@@ -5613,6 +5613,18 @@ def import_mapped():
         import re
         return [clean_barcode(x) for x in re.split(r"[,;|\n]+", raw) if clean_barcode(x)]
 
+    def chunks(values, size=500):
+        for start in range(0, len(values), size):
+            yield values[start:start + size]
+
+    def find_values(query, values):
+        found = []
+        unique_values = list(dict.fromkeys(values))
+        for batch in chunks(unique_values):
+            placeholders = ",".join("?" for _ in batch)
+            found.extend(conn.execute(f"{query} ({placeholders})", batch).fetchall())
+        return found
+
     try:
         with connect_db() as conn:
             if not USE_POSTGRES:
@@ -5629,6 +5641,7 @@ def import_mapped():
                 df = pd.read_csv(filepath, dtype=str) if ext == ".csv" else pd.read_excel(filepath, sheet_name=sheet, dtype=str)
                 df = df.dropna(how="all")
 
+                records = []
                 for _, row in df.iterrows():
                     uploaded_code = clean_barcode(row.get(code_col))
                     if not uploaded_code:
@@ -5641,55 +5654,112 @@ def import_mapped():
                         "price_pc_kgm": format_price(row.get(pc_col)) if pc_col else "",
                         "price_bag": format_price(row.get(bag_col)) if bag_col else "",
                     }
+                    records.append({
+                        "code": uploaded_code,
+                        "name": name,
+                        "prices": prices,
+                        "eans": split_eans(row.get(ean_col)) if ean_col else [],
+                    })
 
-                    if import_mode == "price":
-                        resolved = conn.execute("SELECT article_code FROM ean_aliases WHERE ean_code=?", (uploaded_code,)).fetchone()
-                        article_code = resolved["article_code"] if resolved else uploaded_code
-                        exists = conn.execute("SELECT 1 FROM products WHERE barcode=?", (article_code,)).fetchone()
-                        if not exists:
+                if import_mode == "price":
+                    alias_rows = find_values(
+                        "SELECT ean_code, article_code FROM ean_aliases WHERE ean_code IN",
+                        [record["code"] for record in records],
+                    )
+                    aliases_by_ean = {row["ean_code"]: row["article_code"] for row in alias_rows}
+                    for record in records:
+                        record["article_code"] = aliases_by_ean.get(record["code"], record["code"])
+
+                    existing_rows = find_values(
+                        "SELECT barcode FROM products WHERE barcode IN",
+                        [record["article_code"] for record in records],
+                    )
+                    existing_codes = {row["barcode"] for row in existing_rows}
+                    updates = []
+                    for record in records:
+                        article_code = record["article_code"]
+                        if article_code not in existing_codes:
                             skipped += 1
                             continue
-                        assignments, values = [], []
-                        for col, val in prices.items():
-                            if val != "":
-                                assignments.append(f"{col}=?")
-                                values.append(val)
-                        if not assignments:
+                        prices = record["prices"]
+                        if not any(prices.values()):
                             skipped += 1
                             continue
-                        assignments.append("updated_at=?")
-                        values.extend([now_str, article_code])
-                        conn.execute(f"UPDATE products SET {', '.join(assignments)} WHERE barcode=?", values)
+                        updates.append((
+                            prices["price_cx"], prices["price_cx"],
+                            prices["price_emb"], prices["price_emb"],
+                            prices["price_pc_kgm"], prices["price_pc_kgm"],
+                            prices["price_bag"], prices["price_bag"],
+                            now_str, article_code,
+                        ))
                         existing_updated += 1
-                        continue
 
-                    # MASTER MERGE: article code is canonical; blank uploaded fields never erase old data.
-                    article_code = uploaded_code
-                    existed = conn.execute("SELECT 1 FROM products WHERE barcode=?", (article_code,)).fetchone()
-                    stored_name = name if name else (article_code if not existed else "")
-                    conn.execute("""
-                        INSERT INTO products(barcode,name,price_cx,price_emb,price_pc_kgm,price_bag,updated_at)
-                        VALUES(?,?,?,?,?,?,?)
-                        ON CONFLICT(barcode) DO UPDATE SET
-                          name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE products.name END,
-                          price_cx=CASE WHEN excluded.price_cx<>'' THEN excluded.price_cx ELSE products.price_cx END,
-                          price_emb=CASE WHEN excluded.price_emb<>'' THEN excluded.price_emb ELSE products.price_emb END,
-                          price_pc_kgm=CASE WHEN excluded.price_pc_kgm<>'' THEN excluded.price_pc_kgm ELSE products.price_pc_kgm END,
-                          price_bag=CASE WHEN excluded.price_bag<>'' THEN excluded.price_bag ELSE products.price_bag END,
-                          updated_at=excluded.updated_at
-                    """, (article_code, stored_name, prices["price_cx"], prices["price_emb"], prices["price_pc_kgm"], prices["price_bag"], now_str))
-                    existing_updated += int(bool(existed)); new_added += int(not existed)
+                    update_sql = """
+                        UPDATE products SET
+                          price_cx=CASE WHEN ?<>'' THEN ? ELSE price_cx END,
+                          price_emb=CASE WHEN ?<>'' THEN ? ELSE price_emb END,
+                          price_pc_kgm=CASE WHEN ?<>'' THEN ? ELSE price_pc_kgm END,
+                          price_bag=CASE WHEN ?<>'' THEN ? ELSE price_bag END,
+                          updated_at=?
+                        WHERE barcode=?
+                    """
+                    for batch in chunks(updates):
+                        conn.executemany(update_sql, batch)
+                    continue
 
-                    aliases = [article_code]
-                    if ean_col:
-                        aliases.extend(split_eans(row.get(ean_col)))
-                    for ean in dict.fromkeys(a for a in aliases if a):
-                        # If an EAN was wrongly linked before, latest master upload intentionally corrects it.
-                        conn.execute("""
-                            INSERT INTO ean_aliases(ean_code,article_code,created_at) VALUES(?,?,?)
-                            ON CONFLICT(ean_code) DO UPDATE SET article_code=excluded.article_code
-                        """, (ean, article_code, now_str))
-                        ean_linked += 1
+                article_codes = [record["code"] for record in records]
+                existing_rows = find_values(
+                    "SELECT barcode FROM products WHERE barcode IN",
+                    article_codes,
+                )
+                known_codes = {row["barcode"] for row in existing_rows}
+                product_rows = []
+                alias_rows = []
+                for record in records:
+                    article_code = record["code"]
+                    existed = article_code in known_codes
+                    stored_name = record["name"] if record["name"] else (
+                        article_code if not existed else ""
+                    )
+                    prices = record["prices"]
+                    product_rows.append((
+                        article_code, stored_name, prices["price_cx"],
+                        prices["price_emb"], prices["price_pc_kgm"],
+                        prices["price_bag"], now_str,
+                    ))
+                    if existed:
+                        existing_updated += 1
+                    else:
+                        new_added += 1
+                        known_codes.add(article_code)
+
+                    for ean in dict.fromkeys([article_code, *record["eans"]]):
+                        if ean:
+                            # Latest master upload intentionally corrects a prior wrong EAN link.
+                            alias_rows.append((ean, article_code, now_str))
+                            ean_linked += 1
+
+                product_sql = """
+                    INSERT INTO products
+                      (barcode,name,price_cx,price_emb,price_pc_kgm,price_bag,updated_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(barcode) DO UPDATE SET
+                      name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE products.name END,
+                      price_cx=CASE WHEN excluded.price_cx<>'' THEN excluded.price_cx ELSE products.price_cx END,
+                      price_emb=CASE WHEN excluded.price_emb<>'' THEN excluded.price_emb ELSE products.price_emb END,
+                      price_pc_kgm=CASE WHEN excluded.price_pc_kgm<>'' THEN excluded.price_pc_kgm ELSE products.price_pc_kgm END,
+                      price_bag=CASE WHEN excluded.price_bag<>'' THEN excluded.price_bag ELSE products.price_bag END,
+                      updated_at=excluded.updated_at
+                """
+                alias_sql = """
+                    INSERT INTO ean_aliases(ean_code,article_code,created_at)
+                    VALUES(?,?,?)
+                    ON CONFLICT(ean_code) DO UPDATE SET article_code=excluded.article_code
+                """
+                for batch in chunks(product_rows):
+                    conn.executemany(product_sql, batch)
+                for batch in chunks(alias_rows):
+                    conn.executemany(alias_sql, batch)
 
             conn.commit()
             total_products = conn.execute(
