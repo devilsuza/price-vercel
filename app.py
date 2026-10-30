@@ -1,6 +1,7 @@
 import os
 import uuid
 import sqlite3
+import csv
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string, Response
 import pandas as pd
@@ -5487,33 +5488,86 @@ def preview_excel():
     try:
         tabs_info = []
         if ext == ".csv":
-            df = pd.read_csv(filepath)
-            df = df.dropna(how="all")
-            cols = [str(c) for c in df.columns]
-            sample = df.head(2).fillna("").astype(str).to_dict(orient="records")
+            with open(filepath, newline="", encoding="utf-8-sig") as csv_file:
+                reader = csv.reader(csv_file)
+                header = next(reader, [])
+                cols = [str(column) for column in header]
+                sample = []
+                row_count = 0
+                for values in reader:
+                    if not any(value.strip() for value in values):
+                        continue
+                    row_count += 1
+                    if len(sample) < 2:
+                        sample.append({
+                            column: values[index] if index < len(values) else ""
+                            for index, column in enumerate(cols)
+                        })
             tabs_info.append({
                 "sheet_name": "CSV_Data",
                 "columns": cols,
-                "row_count": len(df),
+                "row_count": row_count,
                 "sample": sample,
             })
+        elif ext == ".xlsx":
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(filepath, read_only=True, data_only=True)
+            try:
+                for sheet in workbook.worksheets:
+                    rows = sheet.iter_rows(values_only=True)
+                    header = next(rows, ())
+                    if not header:
+                        continue
+                    cols = [str(column) if column is not None else "" for column in header]
+                    sample = []
+                    for _ in range(2):
+                        values = next(rows, ())
+                        if values and any(value is not None for value in values):
+                            sample.append({
+                                column: str(values[index]) if index < len(values) and values[index] is not None else ""
+                                for index, column in enumerate(cols)
+                            })
+                    if any(cols):
+                        tabs_info.append({
+                            "sheet_name": sheet.title,
+                            "columns": cols,
+                            "row_count": max((sheet.max_row or 1) - 1, 0),
+                            "sample": sample,
+                        })
+            finally:
+                workbook.close()
+        elif ext == ".xls":
+            import xlrd
+
+            workbook = xlrd.open_workbook(filepath, on_demand=True)
+            try:
+                for sheet in workbook.sheets():
+                    if sheet.nrows == 0:
+                        continue
+                    cols = [str(column) for column in sheet.row_values(0)]
+                    sample = []
+                    for row_index in range(1, min(sheet.nrows, 3)):
+                        values = sheet.row_values(row_index)
+                        if any(str(value).strip() for value in values):
+                            sample.append({
+                                column: str(values[index]) if index < len(values) else ""
+                                for index, column in enumerate(cols)
+                            })
+                    if any(cols):
+                        tabs_info.append({
+                            "sheet_name": sheet.name,
+                            "columns": cols,
+                            "row_count": max(sheet.nrows - 1, 0),
+                            "sample": sample,
+                        })
+            finally:
+                workbook.release_resources()
         else:
-            excel_file = pd.ExcelFile(filepath)
-            for sheet in excel_file.sheet_names:
-                df = excel_file.parse(sheet)
-                df = df.dropna(how="all")
-                if len(df.columns) == 0:
-                    continue
-                cols = [str(c) for c in df.columns]
-                sample = (
-                    df.head(2).fillna("").astype(str).to_dict(orient="records")
-                )
-                tabs_info.append({
-                    "sheet_name": sheet,
-                    "columns": cols,
-                    "row_count": len(df),
-                    "sample": sample,
-                })
+            return jsonify({
+                "success": False,
+                "error": "Unsupported file type. Upload an .xlsx, .xls, or .csv file.",
+            }), 400
 
         if not tabs_info:
             return jsonify({
