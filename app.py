@@ -133,6 +133,21 @@ def init_db():
                 claimed_at TEXT, printed_at TEXT, error_message TEXT
             )
         """)
+        if USE_POSTGRES:
+            print_job_cols = [
+                row["column_name"] for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = 'print_jobs'"
+                ).fetchall()
+            ]
+        else:
+            print_job_cols = [
+                row["name"] for row in conn.execute("PRAGMA table_info(print_jobs)").fetchall()
+            ]
+        if "print_format" not in print_job_cols:
+            conn.execute(
+                "ALTER TABLE print_jobs ADD COLUMN print_format TEXT NOT NULL DEFAULT 'normal'"
+            )
         conn.commit()
 
 
@@ -4259,7 +4274,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v7-print';
+const CACHE_NAME = 'store-price-portal-v8-print-format';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4423,6 +4438,23 @@ HTML_TEMPLATE = """
             <div id="price-result" class="hidden space-y-4"></div>
             <div id="print-status" class="hidden mt-3"></div>
         </div>
+
+        <dialog id="print-format-dialog" class="w-full max-w-sm rounded-2xl p-0 shadow-2xl backdrop:bg-slate-900/60">
+            <div class="p-5">
+                <h2 class="text-lg font-extrabold text-slate-800">Choose print format</h2>
+                <div class="mt-4 grid gap-3">
+                    <button onclick="queuePricePrint('normal')" class="rounded-xl border-2 border-indigo-200 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50">
+                        <span class="block font-bold text-slate-800">Normal</span>
+                        <span class="block text-sm text-slate-500">Current print format</span>
+                    </button>
+                    <button onclick="queuePricePrint('a4_s3')" class="rounded-xl border-2 border-emerald-200 p-4 text-left hover:border-emerald-500 hover:bg-emerald-50">
+                        <span class="block font-bold text-slate-800">A4(S3)</span>
+                        <span class="block text-sm text-slate-500">Format key: a4_s3</span>
+                    </button>
+                </div>
+                <button onclick="document.getElementById('print-format-dialog').close()" class="mt-4 w-full rounded-lg py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+            </div>
+        </dialog>
 
         <!-- ================= MANAGER UPLOAD & EDIT VIEW ================= -->
         <div id="view-manager" class="hidden space-y-6">
@@ -4830,7 +4862,7 @@ HTML_TEMPLATE = """
             const hasPrice = value && String(value).trim() !== "";
             const units = {cx:'CX', emb:'EMB', pc_kgm:'UN', bag:'BAG'};
             const payload = encodeURIComponent(JSON.stringify({article_code:(item.article_code || item.barcode),item_name:item.name,price:value,unit:units[priceType]||'UN'}));
-            return `<button ${hasPrice ? `onclick="queuePricePrint('${payload}')"` : 'disabled'} class="w-full ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-4 text-center shadow-sm transition">
+            return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}')"` : 'disabled'} class="w-full ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-4 text-center shadow-sm transition">
                 <span class="text-xs font-extrabold uppercase tracking-wider block text-slate-600">${label}</span>
                 <span class="text-[11px] text-slate-500 block mb-1">${subLabel} · ${units[priceType]||''}</span>
                 <span class="${hasPrice ? 'text-2xl sm:text-3xl font-black text-slate-900' : 'text-xl font-bold text-slate-400'} block mt-1">${hasPrice ? value : '--'}</span>
@@ -4838,8 +4870,17 @@ HTML_TEMPLATE = """
             </button>`;
         }
 
-        async function queuePricePrint(encoded) {
-            const ticket=JSON.parse(decodeURIComponent(encoded));
+        let pendingPrintPayload = null;
+
+        function selectPricePrint(encoded) {
+            pendingPrintPayload = encoded;
+            document.getElementById('print-format-dialog').showModal();
+        }
+
+        async function queuePricePrint(printFormat) {
+            const ticket=JSON.parse(decodeURIComponent(pendingPrintPayload));
+            pendingPrintPayload = null;
+            document.getElementById('print-format-dialog').close();
 
             // Ask label quantity at the exact moment the user selects a price to print.
             const qtyInput = prompt("How many price labels do you want to print? (1-100)", "1");
@@ -4850,16 +4891,18 @@ HTML_TEMPLATE = """
                 return;
             }
             ticket.copies = copies;
+            ticket.print_format = printFormat;
 
             const status=document.getElementById('print-status');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
-            status.textContent=`⏳ Sending ${copies} label${copies > 1 ? 's' : ''} to printer...`;
+            const formatLabel = printFormat === 'a4_s3' ? 'A4(S3)' : 'Normal';
+            status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to printer...`;
             try {
                 const res=await fetch('/api/print-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ticket)});
                 const data=await res.json();
                 if(res.ok && data.success){
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-emerald-50 text-emerald-800 border border-emerald-300';
-                    status.textContent=`✅ ${data.copies} label${data.copies > 1 ? 's' : ''} queued. Print job #${data.job_id} sent to EPSON printer.`;
+                    status.textContent=`✅ ${data.copies} ${formatLabel} label${data.copies > 1 ? 's' : ''} queued. Print job #${data.job_id} sent to EPSON printer.`;
                 } else {
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
                     status.textContent='❌ '+(data.error||'Print job failed');
@@ -5436,11 +5479,14 @@ def create_print_job():
         return jsonify({"success":False,"error":"Quantity must be a whole number"}),400
     if copies < 1 or copies > 100:
         return jsonify({"success":False,"error":"Quantity must be between 1 and 100"}),400
+    print_format = str(data.get("print_format", "normal")).strip().lower()
+    if print_format not in ("normal", "a4_s3"):
+        return jsonify({"success":False,"error":"Unsupported print format"}),400
     with connect_db() as conn:
-        cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,status,created_at) VALUES(?,?,?,?,?,?,'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,datetime.now().isoformat(timespec='seconds')))
+        cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,datetime.now().isoformat(timespec='seconds')))
         job_id=cur.fetchone()["id"]
         conn.commit()
-    return jsonify({"success":True,"job_id":job_id,"copies":copies})
+    return jsonify({"success":True,"job_id":job_id,"copies":copies,"print_format":print_format})
 
 def _bridge_ok():
     key=os.environ.get("PRINT_BRIDGE_KEY","")
