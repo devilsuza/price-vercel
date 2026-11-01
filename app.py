@@ -2,6 +2,7 @@ import os
 import uuid
 import sqlite3
 import csv
+import re
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string, Response
 import pandas as pd
@@ -76,6 +77,14 @@ def connect_db():
 
 def normalize_article_name(value):
     return " ".join(str(value or "").replace(";", " ").split())
+
+
+def print_article_name(value, price_type):
+    name = str(value or "")
+    if str(price_type or "").strip().lower() not in {"pc_kgm", "bag"}:
+        return name.strip()
+    name = re.sub(r"\b\d+\s*[pP]\s*[xX]\s*(?=\d)", " ", name)
+    return " ".join(name.split())
 
 
 # --- DATABASE SETUP & AUTO-MIGRATION ---
@@ -5928,6 +5937,9 @@ def create_print_job():
         elif print_format in qr_formats:
             return jsonify({"success":False,"error":"QR formats are reserved for Power SKU and KVI articles"}),400
 
+        data["item_name"] = print_article_name(
+            data["item_name"], data.get("price_type")
+        )
         cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,printer_id,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,printer_id,datetime.now().isoformat(timespec='seconds')))
         job_id=cur.fetchone()["id"]
         conn.commit()

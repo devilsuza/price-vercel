@@ -89,6 +89,10 @@ it as `KZ/<UOM>` (for example `KZ/CX`, `KZ/EMB`, or `KZ/UN`). Configure
 Windows `printer_name`. Do not commit the real bridge key. Install the bridge
 dependencies on the printer PC with `py -m pip install Pillow pywin32
 "qrcode[pil]"`, then start it with `run_epson_bridge.bat`.
+For `PC/KGM` (PCE) and `BAG` (BD) price selections, print jobs remove a carton
+pack prefix such as `10Px` from the article name while retaining the item size,
+for example `ACUCAR BRANCO PATRIOTA 10Px1KG` prints as
+`ACUCAR BRANCO PATRIOTA 1KG`.
 
 ### Power SKU and KVI articles
 
