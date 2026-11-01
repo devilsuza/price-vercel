@@ -106,8 +106,9 @@ rejects other formats. Ordinary items continue to use Normal/S3.
 Employees can browse the KVI and Power SKU lists from the scanner screen. Selecting
 an article opens its current daily prices and print action directly beneath that
 article; after a print job is queued, its price/print panel closes automatically.
-The same category lists are available offline after the catalog has synced to the
-device.
+Clicking the same category button again closes its list, while normal price search
+results appear directly beneath the search box. The category lists are also
+available offline after the catalog has synced to the device.
 
 HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and

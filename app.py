@@ -4331,7 +4331,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v16-normalized-article-names';
+const CACHE_NAME = 'store-price-portal-v17-search-and-category-toggle';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4483,6 +4483,9 @@ HTML_TEMPLATE = """
                     </button>
                 </div>
 
+                <div id="price-result" class="hidden mt-4 space-y-4"></div>
+                <div id="print-status" class="hidden mt-3"></div>
+
                 <div class="mt-4 border-t border-slate-200 pt-4">
                     <h3 class="font-bold text-slate-700">Browse special articles</h3>
                     <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -4505,8 +4508,6 @@ HTML_TEMPLATE = """
             </div>
 
             <div id="special-article-list" class="hidden"></div>
-            <div id="price-result" class="hidden space-y-4"></div>
-            <div id="print-status" class="hidden mt-3"></div>
         </div>
 
         <dialog id="print-format-dialog" class="w-full max-w-sm rounded-2xl p-0 shadow-2xl backdrop:bg-slate-900/60">
@@ -5228,6 +5229,11 @@ HTML_TEMPLATE = """
 
         async function browseSpecialArticles(articleType) {
             const list = document.getElementById('special-article-list');
+            if (!list.classList.contains('hidden') && list.dataset.articleType === articleType) {
+                list.classList.add('hidden');
+                return;
+            }
+            list.dataset.articleType = articleType;
             list.classList.remove('hidden');
             list.className = 'min-w-0 w-full rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:p-4';
             list.textContent = 'Loading articles...';
@@ -5259,9 +5265,11 @@ HTML_TEMPLATE = """
                 } else {
                     items = await loadLocalArticles();
                 }
+                if (list.classList.contains('hidden') || list.dataset.articleType !== articleType) return;
                 items.sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
                 renderSpecialArticleList(items, articleType);
             } catch (error) {
+                if (list.classList.contains('hidden') || list.dataset.articleType !== articleType) return;
                 list.className = 'rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700';
                 list.textContent = `❌ ${error.message || 'Unable to load articles.'}`;
             }
