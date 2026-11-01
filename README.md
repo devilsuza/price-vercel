@@ -80,7 +80,16 @@ The print dialog lets you choose **EPSON** (`printer1`) or **HP LaserJet**
 driver installed. The portal routes each queued job only to the matching
 bridge.
 
-EPSON offers `THERMAL`, `NORMAL_QR`, and `S3`. HP LaserJet offers `DISCOUNT_A4`,
+EPSON offers `THERMAL`, `NORMAL_QR`, and `S3`. The included
+`epson_print_bridge.py` uses the selected job UOM for all three layouts, printing
+it as `KZ/<UOM>` (for example `KZ/CX`, `KZ/EMB`, or `KZ/UN`). Configure
+`print_bridge_config.json` beside the script by copying
+`print_bridge_config.example.json`, then set `portal_url`, `bridge_key`, and the
+Windows `printer_name`. Do not commit the real bridge key. Install the bridge
+dependencies on the printer PC with `py -m pip install Pillow pywin32
+"qrcode[pil]"`, then start it with `run_epson_bridge.bat`.
+
+HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
 `PROMOTION_A4_S3`. The selected ID is included as `print_format` in the
 queued job. The HP bridge must implement the matching layouts; this repository
