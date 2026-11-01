@@ -114,6 +114,10 @@ Clicking the same category button again closes its list, while normal price sear
 results appear directly beneath the search box. The category lists are also
 available offline after the catalog has synced to the device.
 
+The offline catalog is checked for a revision every minute; unchanged catalogs
+return a small response instead of downloading every article and EAN again. The
+camera-scanner library is loaded only when the camera button is opened.
+
 Print jobs created while offline are saved in that browser's local IndexedDB
 queue and submitted to the portal automatically after internet connectivity
 returns. They are not printed while offline; direct printing to a local Epson

@@ -87,9 +87,25 @@ def print_article_name(value, price_type):
     return " ".join(name.split())
 
 
+def bump_catalog_revision(conn):
+    conn.execute(
+        "UPDATE catalog_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'"
+    )
+
+
 # --- DATABASE SETUP & AUTO-MIGRATION ---
 def init_db():
     with connect_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO catalog_meta(key,value) VALUES('revision','1') "
+            "ON CONFLICT(key) DO NOTHING"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS products (
                 barcode TEXT PRIMARY KEY,
@@ -133,6 +149,8 @@ def init_db():
                 for row in article_names
             ],
         )
+        if article_names:
+            bump_catalog_revision(conn)
 
         # One article can have multiple EAN/barcodes. This table resolves every EAN
         # back to the single master article stored in products.
@@ -4273,17 +4291,20 @@ def seed_builtin_master():
         if not USE_POSTGRES:
             conn.execute("PRAGMA foreign_keys = ON")
         # Built-in master fills missing articles without resetting updated prices.
-        conn.executemany(
+        product_result = conn.executemany(
             """INSERT INTO products
                (barcode,name,price_cx,price_emb,price_pc_kgm,price_bag,updated_at)
                VALUES(?,?,?,?,?,?,?) ON CONFLICT(barcode) DO NOTHING""",
             products,
         )
-        conn.executemany(
+        alias_result = conn.executemany(
             """INSERT INTO ean_aliases(ean_code,article_code,created_at) VALUES(?,?,?)
-               ON CONFLICT(ean_code) DO UPDATE SET article_code=excluded.article_code""",
+               ON CONFLICT(ean_code) DO UPDATE SET article_code=excluded.article_code
+               WHERE article_code<>excluded.article_code""",
             aliases,
         )
+        if product_result.rowcount or alias_result.rowcount:
+            bump_catalog_revision(conn)
         conn.commit()
 
 
@@ -4347,7 +4368,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v19-offline-print-queue';
+const CACHE_NAME = 'store-price-portal-v20-incremental-sync';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4403,9 +4424,57 @@ HTML_TEMPLATE = """
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#4338ca">
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        body.portal-body {
+            background:
+                radial-gradient(ellipse at 10% 0%, rgba(199, 210, 254, .55), transparent 36rem),
+                linear-gradient(160deg, #f8fafc 0%, #eef2ff 52%, #f8fafc 100%);
+        }
+        nav.portal-nav {
+            background: linear-gradient(115deg, #111827 0%, #312e81 58%, #4338ca 100%);
+            box-shadow: 0 12px 30px rgba(30, 41, 59, .2);
+        }
+        .portal-shell { max-width: 76rem; padding-top: 1.25rem; padding-bottom: 3rem; }
+        .portal-card {
+            border-radius: 1.25rem;
+            box-shadow: 0 12px 32px rgba(30, 41, 59, .08);
+            transition: box-shadow .22s ease, transform .22s ease;
+            animation: portal-enter .38s ease both;
+        }
+        #view-manager > div > .bg-white {
+            border-radius: 1.25rem;
+            box-shadow: 0 12px 32px rgba(30, 41, 59, .08);
+            animation: portal-enter .38s ease both;
+        }
+        @media (hover: hover) {
+            .portal-card:hover { box-shadow: 0 18px 38px rgba(30, 41, 59, .12); }
+        }
+        #login-overlay > div { animation: portal-modal .28s ease both; }
+        #price-result:not(.hidden), #special-article-list:not(.hidden) {
+            animation: portal-enter .24s ease both;
+        }
+        button { transition: transform .16s ease, box-shadow .16s ease, filter .16s ease; }
+        button:active { transform: translateY(1px) scale(.99); }
+        input:focus-visible { box-shadow: 0 0 0 4px rgba(99, 102, 241, .14); }
+        @keyframes portal-enter {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes portal-modal {
+            from { opacity: 0; transform: translateY(10px) scale(.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: .01ms !important;
+                animation-iteration-count: 1 !important;
+                scroll-behavior: auto !important;
+                transition-duration: .01ms !important;
+            }
+        }
+    </style>
 </head>
-<body class="bg-slate-100 min-h-screen font-sans text-slate-800">
+<body class="portal-body bg-slate-100 min-h-screen font-sans text-slate-800">
 
     <!-- ================= LOGIN MODAL OVERLAY ================= -->
     <div id="login-overlay" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -4429,7 +4498,7 @@ HTML_TEMPLATE = """
     </div>
 
     <!-- ================= TOP NAVIGATION ================= -->
-    <nav class="bg-indigo-700 text-white shadow-lg">
+    <nav class="portal-nav bg-indigo-700 text-white shadow-lg">
         <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap justify-between items-center gap-2">
             <div class="flex items-center flex-wrap gap-2">
                 <span class="text-xl font-bold tracking-wide">🏪 Store Price Portal</span>
@@ -4462,7 +4531,7 @@ HTML_TEMPLATE = """
         </div>
     </nav>
 
-    <div class="max-w-5xl mx-auto p-4 mt-2">
+    <div class="portal-shell max-w-5xl mx-auto p-4 mt-2">
 
         <!-- Offline Mode Banner -->
         <div id="offline-banner" class="hidden mb-4 bg-amber-50 border-2 border-amber-400 text-amber-900 px-4 py-3 rounded-xl flex items-center justify-between text-sm font-semibold shadow-sm">
@@ -4474,7 +4543,7 @@ HTML_TEMPLATE = """
 
         <!-- ================= EMPLOYEE SCANNER VIEW ================= -->
         <div id="view-scanner" class="space-y-6">
-            <div class="bg-white p-6 rounded-2xl shadow-md border border-slate-200">
+            <div class="portal-card bg-white p-6 rounded-2xl shadow-md border border-slate-200">
                 <div class="flex justify-between items-center mb-3">
                     <h2 class="text-lg font-bold text-slate-700">Scan Article Barcode or Search Name</h2>
                     <span id="last-sync-time" class="text-[11px] text-slate-400 font-medium"></span>
@@ -4659,6 +4728,7 @@ HTML_TEMPLATE = """
         let html5QrCode = null;
         let cameraActive = false;
         let allManagerProducts = [];
+        let qrLibraryPromise = null;
 
         // PWA Install Prompt
         let deferredPrompt = null;
@@ -4899,17 +4969,28 @@ HTML_TEMPLATE = """
             updateNetworkUI(true);
 
             try {
-                const res = await fetch("/api/sync-all", { cache: "no-store" });
+                const cachedRevision = localStorage.getItem("catalog_revision");
+                const syncUrl = cachedRevision
+                    ? `/api/sync-all?revision=${encodeURIComponent(cachedRevision)}`
+                    : "/api/sync-all";
+                const res = await fetch(syncUrl, { cache: "no-store" });
+                if (!res.ok) throw new Error(`Catalog sync failed (${res.status}).`);
                 const data = await res.json();
-                if (data.success && Array.isArray(data.items)) {
+                if (!data.success) throw new Error(data.error || "Catalog sync failed.");
+                if (Array.isArray(data.items)) {
                     await saveAllToLocalDB(data.items);
-                    document.getElementById('total-count-badge').innerText = `Total Articles in DB: ${data.product_count ?? data.items.length}`;
-                    if (showAlert) {
-                        alert(`✅ Sync Complete! ${data.items.length} articles saved for Offline Mode.`);
-                    }
+                }
+                if (data.revision) localStorage.setItem("catalog_revision", data.revision);
+                const totalProducts = data.product_count ?? data.items?.length ?? 0;
+                document.getElementById('total-count-badge').innerText = `Total Articles in DB: ${totalProducts}`;
+                if (showAlert) {
+                    alert(data.unchanged
+                        ? "✅ Offline catalog is already up to date."
+                        : `✅ Sync Complete! ${data.items.length} articles saved for Offline Mode.`);
                 }
             } catch (err) {
-                console.log("Background sync skipped:", err);
+                console.warn("Background catalog sync failed:", err);
+                if (showAlert) alert(`❌ ${err.message || "Catalog sync failed."}`);
             } finally {
                 isSyncing = false;
                 updateNetworkUI(false);
@@ -5451,20 +5532,41 @@ HTML_TEMPLATE = """
             panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
         }
 
-        function toggleCamera() {
+        function loadQrScannerLibrary() {
+            if (window.Html5Qrcode) return Promise.resolve();
+            if (qrLibraryPromise) return qrLibraryPromise;
+
+            qrLibraryPromise = new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://unpkg.com/html5-qrcode';
+                script.onload = resolve;
+                script.onerror = () => {
+                    qrLibraryPromise = null;
+                    reject(new Error('Barcode scanner library could not be loaded.'));
+                };
+                document.head.appendChild(script);
+            });
+            return qrLibraryPromise;
+        }
+
+        async function toggleCamera() {
             if (cameraActive) {
                 stopCamera();
-            } else {
-                const container = document.getElementById('reader-container');
-                const inlineBtn = document.getElementById('inline-scan-btn');
-                container.classList.remove('hidden');
-                inlineBtn.classList.replace('bg-indigo-50', 'bg-emerald-100');
-                inlineBtn.classList.replace('text-indigo-700', 'text-emerald-700');
+                return;
+            }
 
+            const container = document.getElementById('reader-container');
+            const inlineBtn = document.getElementById('inline-scan-btn');
+            inlineBtn.disabled = true;
+            container.classList.remove('hidden');
+            inlineBtn.classList.replace('bg-indigo-50', 'bg-emerald-100');
+            inlineBtn.classList.replace('text-indigo-700', 'text-emerald-700');
+
+            try {
+                await loadQrScannerLibrary();
                 html5QrCode = new Html5Qrcode("reader");
                 cameraActive = true;
-
-                html5QrCode.start(
+                await html5QrCode.start(
                     { facingMode: "environment" },
                     { fps: 12, qrbox: { width: 250, height: 150 } },
                     (decodedText) => {
@@ -5476,11 +5578,13 @@ HTML_TEMPLATE = """
                         stopCamera();
                         searchArticle(decodedText);
                     },
-                    (errorMessage) => {}
-                ).catch(err => {
-                    alert("Camera open nahi ho paya. Please allow camera permission.");
-                    stopCamera();
-                });
+                    () => {}
+                );
+            } catch (err) {
+                alert(err.message || "Camera open nahi ho paya. Please allow camera permission.");
+                stopCamera();
+            } finally {
+                inlineBtn.disabled = false;
             }
         }
 
@@ -5910,9 +6014,19 @@ def service_worker():
 def api_sync_all():
     canonical_only = request.args.get("canonical") == "1"
     with connect_db() as conn:
+        revision = conn.execute(
+            "SELECT value FROM catalog_meta WHERE key='revision'"
+        ).fetchone()["value"]
         product_count = conn.execute(
             "SELECT COUNT(*) AS total FROM products"
         ).fetchone()["total"]
+        if not canonical_only and request.args.get("revision") == str(revision):
+            return jsonify({
+                "success": True,
+                "unchanged": True,
+                "revision": str(revision),
+                "product_count": product_count,
+            })
         if canonical_only:
             rows = conn.execute(
                 "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag, "
@@ -5933,7 +6047,13 @@ def api_sync_all():
                 item["article_code"] = item["barcode"]
                 item["barcode"] = item.pop("search_key")
                 items.append(item)
-    return jsonify({"success": True, "count": len(items), "product_count": product_count, "items": items})
+    return jsonify({
+        "success": True,
+        "count": len(items),
+        "product_count": product_count,
+        "revision": str(revision),
+        "items": items,
+    })
 
 
 @app.route("/api/update-single", methods=["POST"])
@@ -5963,6 +6083,7 @@ def update_single():
             """,
                 (p_cx, p_emb, p_pc, p_bag, now_str, barcode),
             )
+            bump_catalog_revision(conn)
             conn.commit()
         return jsonify({"success": True})
     except Exception as e:
@@ -6536,6 +6657,7 @@ def import_mapped():
                 raise ValueError(
                     f"No {special_article_type.replace('_', ' ')} articles matched the existing catalog; existing category list was not changed."
                 )
+            bump_catalog_revision(conn)
             conn.commit()
             total_products = conn.execute(
                 "SELECT COUNT(*) AS total FROM products"
