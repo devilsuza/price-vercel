@@ -65,11 +65,13 @@ successful import; the records imported from it are persistent in Supabase.
 
 ### Print format values
 
-The portal sends `print_format: "THERMAL"` for normal label printing and
+The portal sends `print_format: "THERMAL"` for normal label printing,
+`print_format: "NORMAL_QR"` for the Epson bridge's NORMAL_QR layout, and
 `print_format: "S3"` for A4(S3) printing when it creates a print job. The local
-print bridge receives the same value from `GET /api/print-jobs/next`. The API
-also accepts the legacy values `normal` and `a4_s3` and stores them as
-`THERMAL` and `S3`, respectively.
+print bridge receives the same value from `GET /api/print-jobs/next`; configure
+the bridge to handle `NORMAL_QR` to print that layout. The API also accepts the
+legacy values `normal` and `a4_s3` and stores them as `THERMAL` and `S3`,
+respectively.
 
 ### Connecting a second printer PC
 
@@ -78,7 +80,7 @@ The print dialog lets you choose **EPSON** (`printer1`) or **HP LaserJet**
 driver installed. The portal routes each queued job only to the matching
 bridge.
 
-EPSON offers `THERMAL` and `S3`. HP LaserJet offers `DISCOUNT_A4`,
+EPSON offers `THERMAL`, `NORMAL_QR`, and `S3`. HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
 `PROMOTION_A4_S3`. The selected ID is included as `print_format` in the
 queued job. The HP bridge must implement the matching layouts; this repository

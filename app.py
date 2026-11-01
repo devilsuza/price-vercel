@@ -4897,6 +4897,7 @@ HTML_TEMPLATE = """
         const PRINT_FORMAT_OPTIONS = {
             printer1: [
                 {value: 'THERMAL', label: 'Normal'},
+                {value: 'NORMAL_QR', label: 'NORMAL_QR'},
                 {value: 'S3', label: 'A4(S3)'}
             ],
             printer2: [
@@ -5542,7 +5543,7 @@ def create_print_job():
     }
     print_format = format_aliases.get(requested_format, requested_format)
     supported_formats = {
-        "THERMAL", "S3",
+        "THERMAL", "NORMAL_QR", "S3",
         "DISCOUNT_A4", "NORMAL_A4_LANDSCAPE", "NORMAL_A4_PORTRAIT",
         "PROMOTION_A4", "PROMOTION_A4_S3",
     }
@@ -5552,7 +5553,7 @@ def create_print_job():
     if printer_id not in ("printer1", "printer2"):
         return jsonify({"success":False,"error":"Unsupported printer"}),400
     printer_formats = {
-        "printer1": {"THERMAL", "S3"},
+        "printer1": {"THERMAL", "NORMAL_QR", "S3"},
         "printer2": {
             "DISCOUNT_A4", "NORMAL_A4_LANDSCAPE", "NORMAL_A4_PORTRAIT",
             "PROMOTION_A4", "PROMOTION_A4_S3",
