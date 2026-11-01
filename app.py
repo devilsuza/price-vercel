@@ -162,6 +162,7 @@ def init_db():
                 currency TEXT NOT NULL DEFAULT 'KZ', copies INTEGER NOT NULL DEFAULT 1,
                 print_format TEXT NOT NULL DEFAULT 'THERMAL',
                 printer_id TEXT NOT NULL DEFAULT 'printer1',
+                request_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
                 claimed_at TEXT, printed_at TEXT, error_message TEXT
             )
@@ -185,6 +186,12 @@ def init_db():
             conn.execute(
                 "ALTER TABLE print_jobs ADD COLUMN printer_id TEXT NOT NULL DEFAULT 'printer1'"
             )
+        if "request_id" not in print_job_cols:
+            conn.execute("ALTER TABLE print_jobs ADD COLUMN request_id TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_print_jobs_request_id "
+            "ON print_jobs(request_id) WHERE request_id IS NOT NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_print_jobs_printer_status "
             "ON print_jobs(printer_id, status, id)"
@@ -4340,7 +4347,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v17-search-and-category-toggle';
+const CACHE_NAME = 'store-price-portal-v19-offline-print-queue';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4431,6 +4438,7 @@ HTML_TEMPLATE = """
                 <div class="flex items-center space-x-1 bg-indigo-800/90 px-3 py-1 rounded-full border border-indigo-500 text-xs font-semibold">
                     <span id="net-status-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-400 inline-block"></span>
                     <span id="net-status-text">Checking...</span>
+                    <span id="pending-print-count" class="hidden rounded-full bg-amber-300 px-2 py-0.5 text-amber-950"></span>
                     <button onclick="syncDatabaseInBackground(true)" id="btn-manual-sync" title="Sync Database Now" class="ml-1.5 text-indigo-200 hover:text-white">
                         🔄
                     </button>
@@ -4675,11 +4683,13 @@ HTML_TEMPLATE = """
 
         // Offline IndexedDB Engine
         const IDB_NAME = "StorePriceOfflineDB";
-        const IDB_VERSION = 1;
+        const IDB_VERSION = 2;
         const STORE_NAME = "products";
+        const PRINT_QUEUE_STORE = "pending_print_jobs";
         let dbPromise = null;
         let localItemCount = 0;
         let isSyncing = false;
+        let isFlushingPrintQueue = false;
 
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
@@ -4695,6 +4705,9 @@ HTML_TEMPLATE = """
                     const db = e.target.result;
                     if (!db.objectStoreNames.contains(STORE_NAME)) {
                         db.createObjectStore(STORE_NAME, { keyPath: "barcode" });
+                    }
+                    if (!db.objectStoreNames.contains(PRINT_QUEUE_STORE)) {
+                        db.createObjectStore(PRINT_QUEUE_STORE, { keyPath: "request_id" });
                     }
                 };
                 request.onsuccess = (e) => resolve(e.target.result);
@@ -4721,6 +4734,87 @@ HTML_TEMPLATE = """
                 };
                 tx.onerror = (e) => reject(e.target.error);
             });
+        }
+
+        async function savePendingPrintJob(job) {
+            const db = await openLocalDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(PRINT_QUEUE_STORE, "readwrite");
+                tx.objectStore(PRINT_QUEUE_STORE).put(job);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
+        async function getPendingPrintJobs() {
+            const db = await openLocalDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(PRINT_QUEUE_STORE, "readonly");
+                const request = tx.objectStore(PRINT_QUEUE_STORE).getAll();
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function updatePendingPrintBadge() {
+            const badge = document.getElementById('pending-print-count');
+            if (!badge) return;
+            try {
+                const jobs = await getPendingPrintJobs();
+                if (!jobs.length) {
+                    badge.classList.add('hidden');
+                    badge.textContent = '';
+                    return;
+                }
+                const failedCount = jobs.filter(job => job.status === 'failed').length;
+                badge.textContent = failedCount
+                    ? `Print queue: ${jobs.length} (${failedCount} need review)`
+                    : `Print queue: ${jobs.length}`;
+                badge.classList.remove('hidden');
+            } catch (error) {
+                console.warn('Unable to read local print queue:', error);
+            }
+        }
+
+        async function removePendingPrintJob(requestId) {
+            const db = await openLocalDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(PRINT_QUEUE_STORE, "readwrite");
+                tx.objectStore(PRINT_QUEUE_STORE).delete(requestId);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
+        async function flushPendingPrintJobs() {
+            if (!navigator.onLine || isFlushingPrintQueue) return;
+            isFlushingPrintQueue = true;
+            try {
+                const jobs = await getPendingPrintJobs();
+                for (const queued of jobs) {
+                    if (!navigator.onLine) break;
+                    if (queued.status === 'failed') continue;
+                    const response = await fetch('/api/print-jobs', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(queued.job)
+                    });
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        queued.last_error = data.error || 'Unable to queue print job.';
+                        queued.status = response.status >= 500 ? 'pending' : 'failed';
+                        await savePendingPrintJob(queued);
+                        if (queued.status === 'pending') break;
+                        continue;
+                    }
+                    await removePendingPrintJob(queued.request_id);
+                }
+            } catch (error) {
+                console.warn('Pending print queue sync paused:', error);
+            } finally {
+                isFlushingPrintQueue = false;
+                updatePendingPrintBadge();
+            }
         }
 
         async function searchInLocalDB(query) {
@@ -4824,6 +4918,7 @@ HTML_TEMPLATE = """
 
         window.addEventListener('online', () => {
             updateNetworkUI();
+            flushPendingPrintJobs();
             syncDatabaseInBackground(false);
         });
 
@@ -4833,10 +4928,15 @@ HTML_TEMPLATE = """
 
         window.addEventListener('DOMContentLoaded', () => {
             updateNetworkUI();
+            updatePendingPrintBadge();
+            flushPendingPrintJobs();
             syncDatabaseInBackground(false);
             setInterval(() => {
-                if (navigator.onLine) syncDatabaseInBackground(false);
-            }, 10 * 60 * 1000);
+                if (navigator.onLine) {
+                    flushPendingPrintJobs();
+                    syncDatabaseInBackground(false);
+                }
+            }, 60 * 1000);
         });
 
 
@@ -5036,6 +5136,19 @@ HTML_TEMPLATE = """
             queuePricePrint(selectedPrintFormat);
         }
 
+        function hidePrintedPriceDetails(status) {
+            const details = document.getElementById(status.dataset.detailsId);
+            details?.classList.add('hidden');
+            const action = document.getElementById(status.dataset.actionId);
+            if (action) action.textContent = 'View prices & print';
+        }
+
+        function createPrintRequestId() {
+            return crypto.randomUUID
+                ? crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        }
+
         async function queuePricePrint(printFormat) {
             const ticket=JSON.parse(decodeURIComponent(pendingPrintPayload));
             const requiresQr = ['POWER_SKU', 'KVI'].includes(ticket.article_type);
@@ -5056,6 +5169,7 @@ HTML_TEMPLATE = """
             }
             ticket.copies = copies;
             ticket.print_format = printFormat;
+            ticket.request_id = createPrintRequestId();
             const printerId = document.getElementById('print-target').value;
             const printerLabel = printerId === 'printer2' ? 'HP LaserJet' : 'EPSON';
             ticket.printer_id = requiresQr ? 'printer1' : printerId;
@@ -5067,6 +5181,23 @@ HTML_TEMPLATE = """
             const formatLabel = requiresQr
                 ? printFormat
                 : PRINT_FORMAT_OPTIONS[printerId].find(format => format.value === printFormat).label;
+            if (!navigator.onLine) {
+                try {
+                    await savePendingPrintJob({
+                        request_id: ticket.request_id,
+                        job: ticket,
+                        status: 'pending',
+                        created_at: new Date().toISOString()
+                    });
+                    updatePendingPrintBadge();
+                    status.textContent=`📥 Saved on this device. ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} will enter the print queue when internet returns. Not printed yet.`;
+                    hidePrintedPriceDetails(status);
+                } catch (error) {
+                    status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
+                    status.textContent='❌ Could not save offline print job on this device.';
+                }
+                return;
+            }
             status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to ${printerLabel}...`;
             try {
                 const res=await fetch('/api/print-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ticket)});
@@ -5074,17 +5205,38 @@ HTML_TEMPLATE = """
                 if(res.ok && data.success){
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-emerald-50 text-emerald-800 border border-emerald-300';
                     status.textContent=`✅ ${data.copies} ${formatLabel} label${data.copies > 1 ? 's' : ''} queued for ${printerLabel}. Print job #${data.job_id}.`;
-                    const details = document.getElementById(status.dataset.detailsId);
-                    details?.classList.add('hidden');
-                    const action = document.getElementById(status.dataset.actionId);
-                    if (action) action.textContent = 'View prices & print';
+                    hidePrintedPriceDetails(status);
+                } else if (res.status >= 500) {
+                    await savePendingPrintJob({
+                        request_id: ticket.request_id,
+                        job: ticket,
+                        status: 'pending',
+                        created_at: new Date().toISOString()
+                    });
+                    updatePendingPrintBadge();
+                    status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
+                    status.textContent=`📥 Print service error. ${copies} label${copies > 1 ? 's' : ''} saved on this device to retry. Not printed yet.`;
+                    hidePrintedPriceDetails(status);
                 } else {
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
                     status.textContent='❌ '+(data.error||'Print job failed');
                 }
             } catch (error) {
-                status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
-                status.textContent='❌ Unable to connect to the print service.';
+                try {
+                    await savePendingPrintJob({
+                        request_id: ticket.request_id,
+                        job: ticket,
+                        status: 'pending',
+                        created_at: new Date().toISOString()
+                    });
+                    updatePendingPrintBadge();
+                    status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
+                    status.textContent=`📥 Print service unavailable. ${copies} label${copies > 1 ? 's' : ''} saved on this device; will retry when internet returns. Not printed yet.`;
+                    hidePrintedPriceDetails(status);
+                } catch (storageError) {
+                    status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
+                    status.textContent='❌ Unable to reach print service or save the print job on this device.';
+                }
             }
         }
 
@@ -5872,6 +6024,9 @@ def create_print_job():
         return jsonify({"success":False,"error":"Quantity must be a whole number"}),400
     if copies < 1 or copies > 100:
         return jsonify({"success":False,"error":"Quantity must be between 1 and 100"}),400
+    request_id = str(data.get("request_id", "")).strip() or None
+    if request_id and len(request_id) > 120:
+        return jsonify({"success":False,"error":"Invalid print request ID"}),400
     requested_format = str(data.get("print_format", "THERMAL")).strip().upper()
     format_aliases = {
         "NORMAL": "THERMAL",
@@ -5940,8 +6095,30 @@ def create_print_job():
         data["item_name"] = print_article_name(
             data["item_name"], data.get("price_type")
         )
-        cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,printer_id,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,printer_id,datetime.now().isoformat(timespec='seconds')))
-        job_id=cur.fetchone()["id"]
+        cur = conn.execute(
+            """INSERT INTO print_jobs
+                 (article_code,item_name,price,unit,currency,copies,print_format,
+                  printer_id,request_id,status,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?, 'pending',?)
+               ON CONFLICT(request_id) WHERE request_id IS NOT NULL DO NOTHING
+               RETURNING id""",
+            (
+                str(data["article_code"]), str(data["item_name"]),
+                str(data["price"]), str(data.get("unit", "UN")),
+                str(data.get("currency", "KZ")), copies, print_format,
+                printer_id, request_id, datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        inserted_job = cur.fetchone()
+        if inserted_job:
+            job_id = inserted_job["id"]
+        else:
+            existing_job = conn.execute(
+                "SELECT id FROM print_jobs WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            if not existing_job:
+                raise RuntimeError("Unable to resolve duplicate print request.")
+            job_id = existing_job["id"]
         conn.commit()
     return jsonify({"success":True,"job_id":job_id,"copies":copies,"print_format":print_format,"printer_id":printer_id})
 

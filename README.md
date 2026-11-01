@@ -114,6 +114,12 @@ Clicking the same category button again closes its list, while normal price sear
 results appear directly beneath the search box. The category lists are also
 available offline after the catalog has synced to the device.
 
+Print jobs created while offline are saved in that browser's local IndexedDB
+queue and submitted to the portal automatically after internet connectivity
+returns. They are not printed while offline; direct printing to a local Epson
+bridge requires a separate LAN connection/configuration. A queue badge shows
+the number of saved jobs; jobs rejected by the server are marked for review.
+
 HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
 `PROMOTION_A4_S3`. The selected ID is included as `print_format` in the
