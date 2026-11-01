@@ -92,13 +92,16 @@ dependencies on the printer PC with `py -m pip install Pillow pywin32
 ### Power SKU and KVI articles
 
 Managers can import separate Power SKU and KVI spreadsheets from **1C. Power
-SKU / KVI List Price Upload**. Map the article code and List Price; name, EAN,
-and List Price UOM are optional. The existing Master upload also accepts an
-optional article-category column containing `POWER SKU`, `KVI`, or `NORMAL`,
-plus an optional List Price column. These values are included in online and
-offline search results. Scanned Power SKU/KVI articles display their category
-and List Price; they can only be queued as `NORMAL_QR` to EPSON. The API also
-enforces this rule, so ordinary articles remain on the Normal/S3 formats.
+SKU / KVI Article List Upload**. These files only replace the article category
+membership; map the article code and optionally name/EAN. Prices are read from
+the existing Daily Price Update values, which are not overwritten or deleted.
+Uploading a replacement file removes prior membership in that same category
+while preserving the products and prices. The existing Master upload also
+accepts an optional article-category column containing `POWER SKU`, `KVI`, or
+`NORMAL`. Scanned products show their category; Power SKU/KVI show the four
+daily prices and can only be queued as `NORMAL_QR` to EPSON. The API enforces
+that special items print the selected current daily price and rejects other
+formats. Ordinary items continue to use Normal/S3.
 
 HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
