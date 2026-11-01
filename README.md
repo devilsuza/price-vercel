@@ -73,10 +73,10 @@ also accepts the legacy values `normal` and `a4_s3` and stores them as
 
 ### Connecting a second printer PC
 
-The print dialog lets you choose **Existing PC printer** (`printer1`) or
-**Second PC printer** (`printer2`). Each PC must run its own local print bridge
-and have its printer driver installed. The portal routes each queued job only
-to the matching bridge.
+The print dialog lets you choose **EPSON** (`printer1`) or **HP LaserJet**
+(`printer2`). Each PC must run its own local print bridge and have its printer
+driver installed. The portal routes each queued job only to the matching
+bridge.
 
 1. Keep `PRINT_BRIDGE_KEY` configured in Vercel and configure the same key in
    both bridge installations. Do not share or commit the key publicly.
@@ -89,8 +89,7 @@ to the matching bridge.
    `X-Print-Bridge-Key: <same configured key>` as before.
 4. The bridge must send those same two headers when reporting a job to
    `/api/print-jobs/<job_id>/complete`. Start the bridge and verify the
-   second-PC printer is online before selecting **Second PC printer** in the
-   portal.
+   HP LaserJet is online before selecting it in the portal.
 
 The bridge program itself is not part of this repository. If the bridge on the
 second PC cannot set `X-Print-Bridge-Id` on both polling and completion

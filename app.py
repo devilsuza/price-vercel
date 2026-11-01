@@ -4465,8 +4465,8 @@ HTML_TEMPLATE = """
                 <h2 class="text-lg font-extrabold text-slate-800">Choose print format</h2>
                 <label for="print-target" class="mt-4 block text-sm font-semibold text-slate-700">Printer PC</label>
                 <select id="print-target" class="mt-1 w-full rounded-lg border border-slate-300 p-3">
-                    <option value="printer1">Existing PC printer</option>
-                    <option value="printer2">Second PC printer</option>
+                    <option value="printer1">EPSON</option>
+                    <option value="printer2">HP LaserJet</option>
                 </select>
                 <div class="mt-4 grid gap-3">
                     <button onclick="queuePricePrint('THERMAL')" class="rounded-xl border-2 border-indigo-200 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50">
@@ -4919,7 +4919,7 @@ HTML_TEMPLATE = """
             ticket.copies = copies;
             ticket.print_format = printFormat;
             const printerId = document.getElementById('print-target').value;
-            const printerLabel = printerId === 'printer2' ? 'Second PC printer' : 'Existing PC printer';
+            const printerLabel = printerId === 'printer2' ? 'HP LaserJet' : 'EPSON';
             ticket.printer_id = printerId;
 
             const status=document.getElementById('print-status');
