@@ -102,3 +102,11 @@ second PC cannot set `X-Print-Bridge-Id` on both polling and completion
 requests, it needs a configuration update or a compatible bridge client; merely
 installing the existing unmodified bridge on both PCs will not separate their
 queues.
+
+For the supplied `hp_laserjet_promotion_bridge.py`, this repository includes
+`hp_laserjet_bridge_printer2.py` and `run_hp_laserjet_printer2.bat`. Copy both
+beside the original bridge and `hp_laserjet_config.json`, then start the bridge
+with `run_hp_laserjet_printer2.bat`. The wrapper adds the `printer2` ID to both
+polling and completion requests without changing the existing print layouts.
+The supplied bridge currently handles Promotion A4 and Promotion A4 (S3);
+other HP formats require print-layout code in the original bridge.
