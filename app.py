@@ -4300,7 +4300,7 @@ def seed_builtin_master():
         alias_result = conn.executemany(
             """INSERT INTO ean_aliases(ean_code,article_code,created_at) VALUES(?,?,?)
                ON CONFLICT(ean_code) DO UPDATE SET article_code=excluded.article_code
-               WHERE article_code<>excluded.article_code""",
+               WHERE ean_aliases.article_code<>excluded.article_code""",
             aliases,
         )
         if product_result.rowcount or alias_result.rowcount:
