@@ -129,6 +129,7 @@ def init_db():
                 article_code TEXT NOT NULL, item_name TEXT NOT NULL,
                 price TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'UN',
                 currency TEXT NOT NULL DEFAULT 'KZ', copies INTEGER NOT NULL DEFAULT 1,
+                print_format TEXT NOT NULL DEFAULT 'THERMAL',
                 status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
                 claimed_at TEXT, printed_at TEXT, error_message TEXT
             )
@@ -146,8 +147,19 @@ def init_db():
             ]
         if "print_format" not in print_job_cols:
             conn.execute(
-                "ALTER TABLE print_jobs ADD COLUMN print_format TEXT NOT NULL DEFAULT 'normal'"
+                "ALTER TABLE print_jobs ADD COLUMN print_format TEXT NOT NULL DEFAULT 'THERMAL'"
             )
+        conn.execute("""
+            UPDATE print_jobs
+            SET print_format = CASE LOWER(TRIM(print_format))
+                WHEN 'normal' THEN 'THERMAL'
+                WHEN 'thermal' THEN 'THERMAL'
+                WHEN 'a4_s3' THEN 'S3'
+                WHEN 's3' THEN 'S3'
+                ELSE print_format
+            END
+            WHERE LOWER(TRIM(print_format)) IN ('normal', 'thermal', 'a4_s3', 's3')
+        """)
         conn.commit()
 
 
@@ -4443,13 +4455,13 @@ HTML_TEMPLATE = """
             <div class="p-5">
                 <h2 class="text-lg font-extrabold text-slate-800">Choose print format</h2>
                 <div class="mt-4 grid gap-3">
-                    <button onclick="queuePricePrint('normal')" class="rounded-xl border-2 border-indigo-200 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50">
+                    <button onclick="queuePricePrint('THERMAL')" class="rounded-xl border-2 border-indigo-200 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50">
                         <span class="block font-bold text-slate-800">Normal</span>
-                        <span class="block text-sm text-slate-500">Current print format</span>
+                        <span class="block text-sm text-slate-500">Print format: THERMAL</span>
                     </button>
-                    <button onclick="queuePricePrint('a4_s3')" class="rounded-xl border-2 border-emerald-200 p-4 text-left hover:border-emerald-500 hover:bg-emerald-50">
+                    <button onclick="queuePricePrint('S3')" class="rounded-xl border-2 border-emerald-200 p-4 text-left hover:border-emerald-500 hover:bg-emerald-50">
                         <span class="block font-bold text-slate-800">A4(S3)</span>
-                        <span class="block text-sm text-slate-500">Format key: a4_s3</span>
+                        <span class="block text-sm text-slate-500">Print format: S3</span>
                     </button>
                 </div>
                 <button onclick="document.getElementById('print-format-dialog').close()" class="mt-4 w-full rounded-lg py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
@@ -4895,7 +4907,7 @@ HTML_TEMPLATE = """
 
             const status=document.getElementById('print-status');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
-            const formatLabel = printFormat === 'a4_s3' ? 'A4(S3)' : 'Normal';
+            const formatLabel = printFormat === 'S3' ? 'A4(S3)' : 'Normal';
             status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to printer...`;
             try {
                 const res=await fetch('/api/print-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ticket)});
@@ -5479,8 +5491,12 @@ def create_print_job():
         return jsonify({"success":False,"error":"Quantity must be a whole number"}),400
     if copies < 1 or copies > 100:
         return jsonify({"success":False,"error":"Quantity must be between 1 and 100"}),400
-    print_format = str(data.get("print_format", "normal")).strip().lower()
-    if print_format not in ("normal", "a4_s3"):
+    requested_format = str(data.get("print_format", "THERMAL")).strip().upper()
+    if requested_format in ("THERMAL", "NORMAL"):
+        print_format = "THERMAL"
+    elif requested_format in ("S3", "A4_S3"):
+        print_format = "S3"
+    else:
         return jsonify({"success":False,"error":"Unsupported print format"}),400
     with connect_db() as conn:
         cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,datetime.now().isoformat(timespec='seconds')))

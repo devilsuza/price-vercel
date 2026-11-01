@@ -62,3 +62,11 @@ redeploy, so export it before changing deployments if it is still available.
 Without `DATABASE_URL`, local development continues to use `store_prices.db`.
 The original uploaded Excel/CSV file is temporary and is deleted after a
 successful import; the records imported from it are persistent in Supabase.
+
+### Print format values
+
+The portal sends `print_format: "THERMAL"` for normal label printing and
+`print_format: "S3"` for A4(S3) printing when it creates a print job. The local
+print bridge receives the same value from `GET /api/print-jobs/next`. The API
+also accepts the legacy values `normal` and `a4_s3` and stores them as
+`THERMAL` and `S3`, respectively.
