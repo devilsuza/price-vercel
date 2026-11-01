@@ -70,3 +70,30 @@ The portal sends `print_format: "THERMAL"` for normal label printing and
 print bridge receives the same value from `GET /api/print-jobs/next`. The API
 also accepts the legacy values `normal` and `a4_s3` and stores them as
 `THERMAL` and `S3`, respectively.
+
+### Connecting a second printer PC
+
+The print dialog lets you choose **Existing PC printer** (`printer1`) or
+**Second PC printer** (`printer2`). Each PC must run its own local print bridge
+and have its printer driver installed. The portal routes each queued job only
+to the matching bridge.
+
+1. Keep `PRINT_BRIDGE_KEY` configured in Vercel and configure the same key in
+   both bridge installations. Do not share or commit the key publicly.
+2. On the existing PC, keep the current bridge setup. If its bridge supports
+   `X-Print-Bridge-Id`, set it to `printer1`; requests without this header
+   continue to be treated as `printer1`.
+3. On the second PC, install/configure the print bridge and its printer driver.
+   Point it at the deployed portal's `/api/print-jobs/next` endpoint and set
+   `X-Print-Bridge-Id: printer2` on its polling requests. Send
+   `X-Print-Bridge-Key: <same configured key>` as before.
+4. The bridge must send those same two headers when reporting a job to
+   `/api/print-jobs/<job_id>/complete`. Start the bridge and verify the
+   second-PC printer is online before selecting **Second PC printer** in the
+   portal.
+
+The bridge program itself is not part of this repository. If the bridge on the
+second PC cannot set `X-Print-Bridge-Id` on both polling and completion
+requests, it needs a configuration update or a compatible bridge client; merely
+installing the existing unmodified bridge on both PCs will not separate their
+queues.

@@ -130,6 +130,7 @@ def init_db():
                 price TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'UN',
                 currency TEXT NOT NULL DEFAULT 'KZ', copies INTEGER NOT NULL DEFAULT 1,
                 print_format TEXT NOT NULL DEFAULT 'THERMAL',
+                printer_id TEXT NOT NULL DEFAULT 'printer1',
                 status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
                 claimed_at TEXT, printed_at TEXT, error_message TEXT
             )
@@ -149,6 +150,14 @@ def init_db():
             conn.execute(
                 "ALTER TABLE print_jobs ADD COLUMN print_format TEXT NOT NULL DEFAULT 'THERMAL'"
             )
+        if "printer_id" not in print_job_cols:
+            conn.execute(
+                "ALTER TABLE print_jobs ADD COLUMN printer_id TEXT NOT NULL DEFAULT 'printer1'"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_print_jobs_printer_status "
+            "ON print_jobs(printer_id, status, id)"
+        )
         conn.execute("""
             UPDATE print_jobs
             SET print_format = CASE LOWER(TRIM(print_format))
@@ -4286,7 +4295,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v8-print-format';
+const CACHE_NAME = 'store-price-portal-v9-printer-routing';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4454,6 +4463,11 @@ HTML_TEMPLATE = """
         <dialog id="print-format-dialog" class="w-full max-w-sm rounded-2xl p-0 shadow-2xl backdrop:bg-slate-900/60">
             <div class="p-5">
                 <h2 class="text-lg font-extrabold text-slate-800">Choose print format</h2>
+                <label for="print-target" class="mt-4 block text-sm font-semibold text-slate-700">Printer PC</label>
+                <select id="print-target" class="mt-1 w-full rounded-lg border border-slate-300 p-3">
+                    <option value="printer1">Existing PC printer</option>
+                    <option value="printer2">Second PC printer</option>
+                </select>
                 <div class="mt-4 grid gap-3">
                     <button onclick="queuePricePrint('THERMAL')" class="rounded-xl border-2 border-indigo-200 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50">
                         <span class="block font-bold text-slate-800">Normal</span>
@@ -4904,17 +4918,20 @@ HTML_TEMPLATE = """
             }
             ticket.copies = copies;
             ticket.print_format = printFormat;
+            const printerId = document.getElementById('print-target').value;
+            const printerLabel = printerId === 'printer2' ? 'Second PC printer' : 'Existing PC printer';
+            ticket.printer_id = printerId;
 
             const status=document.getElementById('print-status');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
             const formatLabel = printFormat === 'S3' ? 'A4(S3)' : 'Normal';
-            status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to printer...`;
+            status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to ${printerLabel}...`;
             try {
                 const res=await fetch('/api/print-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ticket)});
                 const data=await res.json();
                 if(res.ok && data.success){
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-emerald-50 text-emerald-800 border border-emerald-300';
-                    status.textContent=`✅ ${data.copies} ${formatLabel} label${data.copies > 1 ? 's' : ''} queued. Print job #${data.job_id} sent to EPSON printer.`;
+                    status.textContent=`✅ ${data.copies} ${formatLabel} label${data.copies > 1 ? 's' : ''} queued for ${printerLabel}. Print job #${data.job_id}.`;
                 } else {
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
                     status.textContent='❌ '+(data.error||'Print job failed');
@@ -5498,37 +5515,52 @@ def create_print_job():
         print_format = "S3"
     else:
         return jsonify({"success":False,"error":"Unsupported print format"}),400
+    printer_id = str(data.get("printer_id", "printer1")).strip()
+    if printer_id not in ("printer1", "printer2"):
+        return jsonify({"success":False,"error":"Unsupported printer"}),400
     with connect_db() as conn:
-        cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,status,created_at) VALUES(?,?,?,?,?,?,?,'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,datetime.now().isoformat(timespec='seconds')))
+        cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,printer_id,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,printer_id,datetime.now().isoformat(timespec='seconds')))
         job_id=cur.fetchone()["id"]
         conn.commit()
-    return jsonify({"success":True,"job_id":job_id,"copies":copies,"print_format":print_format})
+    return jsonify({"success":True,"job_id":job_id,"copies":copies,"print_format":print_format,"printer_id":printer_id})
 
 def _bridge_ok():
     key=os.environ.get("PRINT_BRIDGE_KEY","")
     return bool(key) and request.headers.get("X-Print-Bridge-Key","")==key
 
+def _bridge_printer_id():
+    printer_id = request.headers.get("X-Print-Bridge-Id", "printer1").strip()
+    return printer_id if printer_id in ("printer1", "printer2") else None
+
 @app.route("/api/print-jobs/next")
 def next_print_job():
     if not _bridge_ok(): return jsonify({"success":False,"error":"Unauthorized"}),401
+    printer_id = _bridge_printer_id()
+    if not printer_id: return jsonify({"success":False,"error":"Unsupported printer"}),400
     with connect_db() as conn:
         if not USE_POSTGRES:
             conn.execute("BEGIN IMMEDIATE")
-        claim_query = "SELECT * FROM print_jobs WHERE status='pending' ORDER BY id LIMIT 1"
+        claim_query = "SELECT * FROM print_jobs WHERE status='pending' AND printer_id=? ORDER BY id LIMIT 1"
         if USE_POSTGRES:
             claim_query += " FOR UPDATE SKIP LOCKED"
-        row=conn.execute(claim_query).fetchone()
+        row=conn.execute(claim_query, (printer_id,)).fetchone()
         if not row: conn.commit(); return jsonify({"success":True,"job":None})
-        conn.execute("UPDATE print_jobs SET status='claimed',claimed_at=? WHERE id=?",(datetime.now().isoformat(timespec='seconds'),row['id'])); conn.commit()
+        conn.execute("UPDATE print_jobs SET status='claimed',claimed_at=? WHERE id=? AND printer_id=?",(datetime.now().isoformat(timespec='seconds'),row['id'],printer_id)); conn.commit()
     return jsonify({"success":True,"job":dict(row)})
 
 @app.route("/api/print-jobs/<int:job_id>/complete",methods=["POST"])
 def complete_print_job(job_id):
     if not _bridge_ok(): return jsonify({"success":False,"error":"Unauthorized"}),401
+    printer_id = _bridge_printer_id()
+    if not printer_id: return jsonify({"success":False,"error":"Unsupported printer"}),400
     data=request.get_json(silent=True) or {}; ok=bool(data.get('success'))
     with connect_db() as conn:
-        if ok: conn.execute("UPDATE print_jobs SET status='printed',printed_at=?,error_message=NULL WHERE id=?",(datetime.now().isoformat(timespec='seconds'),job_id))
-        else: conn.execute("UPDATE print_jobs SET status='pending',error_message=? WHERE id=?",(str(data.get('error','Print failed'))[:500],job_id))
+        if ok:
+            result=conn.execute("UPDATE print_jobs SET status='printed',printed_at=?,error_message=NULL WHERE id=? AND printer_id=? AND status='claimed'",(datetime.now().isoformat(timespec='seconds'),job_id,printer_id))
+        else:
+            result=conn.execute("UPDATE print_jobs SET status='pending',error_message=? WHERE id=? AND printer_id=? AND status='claimed'",(str(data.get('error','Print failed'))[:500],job_id,printer_id))
+        if result.rowcount == 0:
+            return jsonify({"success":False,"error":"Print job not found for this printer"}),404
         conn.commit()
     return jsonify({"success":True})
 
