@@ -74,6 +74,10 @@ def connect_db():
     return DatabaseConnection(connection)
 
 
+def normalize_article_name(value):
+    return " ".join(str(value or "").replace(";", " ").split())
+
+
 # --- DATABASE SETUP & AUTO-MIGRATION ---
 def init_db():
     with connect_db() as conn:
@@ -109,6 +113,16 @@ def init_db():
             if col not in existing_cols:
                 default = "NORMAL" if col == "article_type" else "UN" if col == "list_price_unit" else ""
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT NOT NULL DEFAULT '{default}'")
+        article_names = conn.execute(
+            "SELECT barcode, name FROM products WHERE name LIKE '%;%'"
+        ).fetchall()
+        conn.executemany(
+            "UPDATE products SET name=? WHERE barcode=?",
+            [
+                (normalize_article_name(row["name"]), row["barcode"])
+                for row in article_names
+            ],
+        )
 
         # One article can have multiple EAN/barcodes. This table resolves every EAN
         # back to the single master article stored in products.
@@ -4231,7 +4245,7 @@ def seed_builtin_master():
             continue
         prices = list(item.get("p", [])) + ["", "", "", ""]
         products.append(
-            (code, item.get("n") or code, prices[0], prices[1], prices[2], prices[3], now_str)
+            (code, normalize_article_name(item.get("n") or code), prices[0], prices[1], prices[2], prices[3], now_str)
         )
         for ean in item.get("e", []):
             ean = clean_barcode(ean)
@@ -4316,7 +4330,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v15-mobile-special-layout';
+const CACHE_NAME = 'store-price-portal-v16-normalized-article-names';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4719,7 +4733,7 @@ HTML_TEMPLATE = """
                             if (cursor && matches.length < 15) {
                                 const item = cursor.value;
                                 const bMatch = item.barcode && item.barcode.toLowerCase().includes(lowerQ);
-                                const nMatch = item.name && item.name.toLowerCase().includes(lowerQ);
+                                const nMatch = item.name && displayArticleName(item.name).toLowerCase().includes(lowerQ);
                                 if (bMatch || nMatch) {
                                     matches.push(item);
                                 }
@@ -4930,13 +4944,17 @@ HTML_TEMPLATE = """
             }
         });
 
+        function displayArticleName(name) {
+            return String(name || '').replace(/;/g, ' ').replace(/\\s+/g, ' ').trim();
+        }
+
         function renderPriceBox(label, subLabel, value, colorClass, item, priceType, statusId = 'print-status') {
             const hasPrice = value && String(value).trim() !== "";
             const units = {cx:'CX', emb:'EMB', pc_kgm:'UN', bag:'BAG'};
             const articleType = item.article_type || 'NORMAL';
             const payload = encodeURIComponent(JSON.stringify({
                 article_code:(item.article_code || item.barcode),
-                item_name:item.name,
+                item_name:displayArticleName(item.name),
                 price:value,
                 unit:units[priceType]||'UN',
                 price_type:priceType,
@@ -5087,7 +5105,7 @@ HTML_TEMPLATE = """
                                     ${sourceLabel}
                                 </span>
                             </div>
-                            <h3 class="mt-2 break-words text-xl font-black text-slate-900 sm:text-3xl">${item.name}</h3>
+                            <h3 class="mt-2 break-words text-xl font-black text-slate-900 sm:text-3xl">${displayArticleName(item.name)}</h3>
                         </div>
                     </div>
 
@@ -5174,7 +5192,7 @@ HTML_TEMPLATE = """
                 details.className = 'min-w-0';
                 const name = document.createElement('span');
                 name.className = 'block truncate font-bold text-slate-800';
-                name.textContent = item.name || item.barcode;
+                name.textContent = displayArticleName(item.name) || item.barcode;
                 const code = document.createElement('span');
                 code.className = 'mt-1 block text-xs text-slate-500';
                 code.textContent = `Article Code: ${item.barcode}`;
@@ -5341,7 +5359,7 @@ HTML_TEMPLATE = """
             tbody.innerHTML = items.map(item => `
                 <tr class="hover:bg-slate-50 transition" id="row-${item.barcode}">
                     <td class="px-3 py-2.5 font-bold text-slate-700">${item.barcode}</td>
-                    <td class="px-3 py-2.5 font-medium text-slate-900 max-w-xs truncate" title="${item.name}">${item.name}</td>
+                    <td class="px-3 py-2.5 font-medium text-slate-900 max-w-xs truncate" title="${displayArticleName(item.name)}">${displayArticleName(item.name)}</td>
                     <td class="px-2 py-2 text-center"><input type="text" id="cx-${item.barcode}" value="${item.price_cx || ''}" class="w-20 p-1.5 text-center border border-slate-300 rounded-lg text-xs font-semibold focus:border-indigo-600 bg-slate-50"></td>
                     <td class="px-2 py-2 text-center"><input type="text" id="emb-${item.barcode}" value="${item.price_emb || ''}" class="w-20 p-1.5 text-center border border-slate-300 rounded-lg text-xs font-semibold focus:border-indigo-600 bg-slate-50"></td>
                     <td class="px-2 py-2 text-center"><input type="text" id="pc-${item.barcode}" value="${item.price_pc_kgm || ''}" class="w-20 p-1.5 text-center border border-slate-300 rounded-lg text-xs font-semibold focus:border-indigo-600 bg-slate-50"></td>
@@ -5363,7 +5381,7 @@ HTML_TEMPLATE = """
             }
             const filtered = allManagerProducts.filter(item => 
                 (item.barcode && item.barcode.toLowerCase().includes(query)) || 
-                (item.name && item.name.toLowerCase().includes(query))
+                (item.name && displayArticleName(item.name).toLowerCase().includes(query))
             );
             renderManagerTable(filtered);
         }
@@ -6135,7 +6153,7 @@ def import_mapped():
                     if not uploaded_code:
                         skipped += 1
                         continue
-                    name = clean_barcode(row.get(name_col)) if name_col else ""
+                    name = normalize_article_name(clean_barcode(row.get(name_col))) if name_col else ""
                     prices = {
                         "price_cx": format_price(row.get(cx_col)) if cx_col else "",
                         "price_emb": format_price(row.get(emb_col)) if emb_col else "",
