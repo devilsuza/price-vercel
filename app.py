@@ -4316,7 +4316,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v14-inline-special-print';
+const CACHE_NAME = 'store-price-portal-v15-mobile-special-layout';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4942,10 +4942,10 @@ HTML_TEMPLATE = """
                 price_type:priceType,
                 article_type:articleType
             }));
-            return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}', '${statusId}')"` : 'disabled'} class="w-full ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-4 text-center shadow-sm transition">
+            return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}', '${statusId}')"` : 'disabled'} class="w-full min-w-0 ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-3 text-center shadow-sm transition sm:p-4">
                 <span class="text-xs font-extrabold uppercase tracking-wider block text-slate-600">${label}</span>
                 <span class="text-[11px] text-slate-500 block mb-1">${subLabel} · ${units[priceType]||''}</span>
-                <span class="${hasPrice ? 'text-2xl sm:text-3xl font-black text-slate-900' : 'text-xl font-bold text-slate-400'} block mt-1">${hasPrice ? value : '--'}</span>
+                <span class="${hasPrice ? 'text-2xl sm:text-3xl font-black text-slate-900' : 'text-xl font-bold text-slate-400'} block mt-1 break-words">${hasPrice ? value : '--'}</span>
                 ${hasPrice ? '<span class="block mt-2 text-sm font-black text-indigo-700">🖨️ PRINT THIS PRICE</span>' : ''}
             </button>`;
         }
@@ -5073,25 +5073,25 @@ HTML_TEMPLATE = """
             }
 
             resultBox.innerHTML = items.map(item => `
-                <div class="bg-white border-2 border-indigo-500 p-6 rounded-2xl shadow-lg space-y-5">
+                <div class="min-w-0 rounded-2xl border-2 border-indigo-500 bg-white p-3 shadow-lg space-y-5 sm:p-6">
                     <div class="border-b border-slate-200 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                        <div>
-                            <div class="flex items-center gap-2">
-                                <span class="text-xs font-extrabold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-3 py-1 rounded-lg">
+                        <div class="min-w-0 w-full">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="max-w-full break-all rounded-lg bg-indigo-100 px-3 py-1 text-xs font-extrabold uppercase tracking-wider text-indigo-800">
                                     Article Code: ${item.article_code || item.barcode}
                                 </span>
-                                <span class="text-xs font-extrabold uppercase tracking-wider ${item.article_type === 'KVI' ? 'bg-rose-100 text-rose-800' : item.article_type === 'POWER_SKU' ? 'bg-violet-100 text-violet-800' : 'bg-slate-100 text-slate-700'} px-3 py-1 rounded-lg">
+                                <span class="max-w-full break-words rounded-lg px-3 py-1 text-xs font-extrabold uppercase tracking-wider ${item.article_type === 'KVI' ? 'bg-rose-100 text-rose-800' : item.article_type === 'POWER_SKU' ? 'bg-violet-100 text-violet-800' : 'bg-slate-100 text-slate-700'}">
                                     ${item.article_type === 'POWER_SKU' ? 'POWER SKU' : item.article_type || 'NORMAL'}
                                 </span>
-                                <span class="text-[11px] font-semibold px-2.5 py-0.5 rounded-md ${sourceLabel.includes('Offline') ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}">
+                                <span class="max-w-full break-words rounded-md px-2.5 py-0.5 text-[11px] font-semibold ${sourceLabel.includes('Offline') ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}">
                                     ${sourceLabel}
                                 </span>
                             </div>
-                            <h3 class="text-2xl sm:text-3xl font-black text-slate-900 mt-2">${item.name}</h3>
+                            <h3 class="mt-2 break-words text-xl font-black text-slate-900 sm:text-3xl">${item.name}</h3>
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                    <div class="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-4">
                         ${renderPriceBox('Price', '1', item.price_cx, 'bg-emerald-50 border-emerald-400', item, 'cx', statusId)}
                         ${renderPriceBox('Price', '2', item.price_emb, 'bg-blue-50 border-blue-400', item, 'emb', statusId)}
                         ${renderPriceBox('Price', '3', item.price_pc_kgm, 'bg-amber-50 border-amber-400', item, 'pc_kgm', statusId)}
@@ -5112,7 +5112,7 @@ HTML_TEMPLATE = """
             if (!navigator.onLine) {
                 const localItems = await searchInLocalDB(query);
                 displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
-                inputEl.select();
+                if (!resultTarget) inputEl.select();
                 return;
             }
 
@@ -5129,18 +5129,18 @@ HTML_TEMPLATE = """
 
                 const data = await res.json();
                 displaySearchResults(data.items || [], query, "🟢 Online Live DB", resultBox);
-                inputEl.select();
+                if (!resultTarget) inputEl.select();
             } catch (err) {
                 const localItems = await searchInLocalDB(query);
                 displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
-                inputEl.select();
+                if (!resultTarget) inputEl.select();
             }
         }
 
         function renderSpecialArticleList(items, articleType) {
             const list = document.getElementById('special-article-list');
             list.classList.remove('hidden');
-            list.className = 'rounded-2xl border border-slate-200 bg-slate-50 p-4';
+            list.className = 'min-w-0 w-full rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:p-4';
             list.replaceChildren();
 
             const title = document.createElement('h3');
@@ -5157,12 +5157,12 @@ HTML_TEMPLATE = """
             }
 
             const entries = document.createElement('div');
-            entries.className = 'mt-3 grid gap-2';
+            entries.className = 'mt-3 grid min-w-0 gap-2';
             for (const [index, item] of items.entries()) {
                 const rowId = `special-article-${index}`;
                 const button = document.createElement('button');
                 button.type = 'button';
-                button.className = 'flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm hover:border-indigo-400 hover:bg-indigo-50';
+                button.className = 'flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-sm hover:border-indigo-400 hover:bg-indigo-50 sm:gap-3 sm:p-4';
                 const actionId = `${rowId}-action`;
                 const panelId = `${rowId}-panel`;
                 const resultId = `${rowId}-prices`;
@@ -5188,7 +5188,7 @@ HTML_TEMPLATE = """
 
                 const panel = document.createElement('div');
                 panel.id = panelId;
-                panel.className = 'hidden mt-2 rounded-xl border border-indigo-200 bg-white p-3';
+                panel.className = 'hidden mt-2 min-w-0 rounded-xl border border-indigo-200 bg-white p-2 sm:p-3';
                 const result = document.createElement('div');
                 result.id = resultId;
                 result.dataset.printStatusId = statusId;
@@ -5210,7 +5210,7 @@ HTML_TEMPLATE = """
         async function browseSpecialArticles(articleType) {
             const list = document.getElementById('special-article-list');
             list.classList.remove('hidden');
-            list.className = 'rounded-2xl border border-slate-200 bg-slate-50 p-4';
+            list.className = 'min-w-0 w-full rounded-2xl border border-slate-200 bg-slate-50 p-2 sm:p-4';
             list.textContent = 'Loading articles...';
             try {
                 const loadLocalArticles = async () => {
