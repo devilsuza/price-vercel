@@ -4449,7 +4449,132 @@ HTML_TEMPLATE = """
         @media (hover: hover) {
             .portal-card:hover { box-shadow: 0 18px 38px rgba(30, 41, 59, .12); }
         }
-        #login-overlay > div { animation: portal-modal .28s ease both; }
+        #login-overlay > .login-card { animation: login-card-enter .72s cubic-bezier(.2, .8, .2, 1) both; }
+        #login-overlay {
+            isolation: isolate;
+            overflow: hidden;
+            background:
+                radial-gradient(ellipse at 18% 20%, rgba(99, 102, 241, .36), transparent 34rem),
+                radial-gradient(ellipse at 86% 82%, rgba(14, 165, 233, .23), transparent 30rem),
+                rgba(15, 23, 42, .88);
+        }
+        #login-overlay::before, #login-overlay::after {
+            position: absolute;
+            z-index: -1;
+            width: 18rem;
+            height: 18rem;
+            border: 1px solid rgba(255, 255, 255, .12);
+            border-radius: 9999px;
+            content: "";
+            pointer-events: none;
+            animation: login-orbit 18s ease-in-out infinite alternate;
+        }
+        #login-overlay::before { top: -8rem; left: -5rem; }
+        #login-overlay::after {
+            right: -7rem;
+            bottom: -10rem;
+            width: 25rem;
+            height: 25rem;
+            animation-delay: -7s;
+        }
+        .login-card {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            max-width: 26rem;
+            padding: clamp(1.75rem, 6vw, 2.5rem);
+            border: 1px solid rgba(255, 255, 255, .7);
+            border-radius: 1.75rem;
+            background: linear-gradient(145deg, rgba(255, 255, 255, .99), rgba(238, 242, 255, .97));
+            box-shadow: 0 32px 90px rgba(2, 6, 23, .42), 0 0 0 1px rgba(255, 255, 255, .12);
+            text-align: center;
+        }
+        .login-card::before {
+            position: absolute;
+            inset: 0 0 auto;
+            height: 4px;
+            background: linear-gradient(90deg, #38bdf8, #6366f1, #a78bfa);
+            content: "";
+        }
+        .login-brand-icon {
+            position: relative;
+            display: grid;
+            width: 4.25rem;
+            height: 4.25rem;
+            margin: 0 auto 1.25rem;
+            place-items: center;
+            border: 1px solid rgba(165, 180, 252, .65);
+            border-radius: 1.35rem;
+            background: linear-gradient(145deg, #eef2ff, #e0e7ff);
+            color: #4338ca;
+            box-shadow: 0 10px 24px rgba(79, 70, 229, .14);
+            animation: login-icon-float 4s ease-in-out infinite;
+        }
+        .login-kicker {
+            color: #4f46e5;
+            font-size: .68rem;
+            font-weight: 800;
+            letter-spacing: .19em;
+        }
+        .login-input {
+            width: 100%;
+            border: 1.5px solid #c7d2fe;
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, .82);
+            padding: .95rem 1rem;
+            color: #0f172a;
+            font-size: 1rem;
+            font-weight: 600;
+            text-align: center;
+            outline: none;
+            transition: border-color .2s ease, box-shadow .2s ease, background .2s ease;
+        }
+        .login-input::placeholder { color: #94a3b8; font-weight: 500; }
+        .login-input:focus {
+            border-color: #6366f1;
+            background: #fff;
+            box-shadow: 0 0 0 4px rgba(99, 102, 241, .13), 0 8px 20px rgba(79, 70, 229, .08);
+        }
+        .login-submit {
+            position: relative;
+            display: flex;
+            width: 100%;
+            align-items: center;
+            justify-content: center;
+            gap: .6rem;
+            overflow: hidden;
+            border: 0;
+            border-radius: 1rem;
+            background: linear-gradient(110deg, #4338ca, #4f46e5 55%, #6366f1);
+            padding: .95rem 1.25rem;
+            color: #fff;
+            font-weight: 800;
+            box-shadow: 0 10px 22px rgba(67, 56, 202, .27);
+            transition: transform .2s ease, box-shadow .2s ease, filter .2s ease;
+        }
+        .login-submit:hover {
+            transform: translateY(-2px);
+            filter: brightness(1.06);
+            box-shadow: 0 14px 28px rgba(67, 56, 202, .34);
+        }
+        .login-submit:focus-visible { outline: 3px solid #a5b4fc; outline-offset: 3px; }
+        #login-error:not(.hidden) { animation: login-error-in .28s ease both; }
+        @keyframes login-card-enter {
+            from { opacity: 0; transform: translateY(24px) scale(.96); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes login-orbit {
+            from { transform: translate3d(-1rem, 0, 0) scale(.94); }
+            to { transform: translate3d(2rem, 1.5rem, 0) scale(1.08); }
+        }
+        @keyframes login-icon-float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+        @keyframes login-error-in {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
         #price-result:not(.hidden), #special-article-list:not(.hidden) {
             animation: portal-enter .24s ease both;
         }
@@ -4477,23 +4602,32 @@ HTML_TEMPLATE = """
 <body class="portal-body bg-slate-100 min-h-screen font-sans text-slate-800">
 
     <!-- ================= LOGIN MODAL OVERLAY ================= -->
-    <div id="login-overlay" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <div class="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-6 border border-slate-200 text-center">
-            <div class="w-14 h-14 bg-indigo-100 text-indigo-700 rounded-2xl flex items-center justify-center mx-auto mb-3 text-2xl font-bold shadow-sm">
-                🔐
+    <div id="login-overlay" class="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-4">
+        <div class="login-card">
+            <div class="login-brand-icon" aria-hidden="true">
+                <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 10h18l-1.6-6H4.6L3 10Z"/>
+                    <path d="M5 10v10h14V10M9 20v-6h6v6M3 10a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0"/>
+                </svg>
             </div>
-            <h2 class="text-xl font-extrabold text-slate-800">Store Portal Login</h2>
-            <p class="text-xs text-slate-500 mt-1 mb-5">Enter PIN for Employee or Manager</p>
+            <p class="login-kicker mb-2">SECURE STORE ACCESS</p>
+            <h2 class="text-2xl font-extrabold tracking-tight text-slate-900">Welcome back</h2>
+            <p class="mt-2 mb-7 text-sm text-slate-500">Sign in to continue to your price portal</p>
 
-            <input type="password" id="login-pin" autofocus
-                placeholder="Enter Password"
-                class="w-full px-4 py-3 text-center text-xl tracking-widest font-bold border-2 border-indigo-300 rounded-xl focus:outline-none focus:border-indigo-600 mb-3">
+            <label for="login-pin" class="mb-2 block text-left text-xs font-bold uppercase tracking-wider text-slate-600">Employee or manager PIN</label>
+            <input type="password" id="login-pin" autofocus autocomplete="current-password"
+                placeholder="Enter your PIN"
+                class="login-input mb-4">
             
-            <p id="login-error" class="text-xs font-bold text-red-600 mb-3 hidden">❌ Wrong Password! Try again.</p>
+            <p id="login-error" role="alert" class="mb-3 text-xs font-bold text-red-600 hidden">❌ Wrong Password! Try again.</p>
 
-            <button onclick="handleLogin()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl shadow-md transition">
-                Login Now
+            <button type="button" onclick="handleLogin()" class="login-submit">
+                <span>Sign in securely</span>
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14M13 6l6 6-6 6"/>
+                </svg>
             </button>
+            <p class="mt-6 text-[11px] font-medium text-slate-400">🔒 Your access is protected</p>
         </div>
     </div>
 
