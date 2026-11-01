@@ -4316,7 +4316,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v12-normal-qr-s3';
+const CACHE_NAME = 'store-price-portal-v13-special-article-browser';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4468,6 +4468,18 @@ HTML_TEMPLATE = """
                     </button>
                 </div>
 
+                <div class="mt-4 border-t border-slate-200 pt-4">
+                    <h3 class="font-bold text-slate-700">Browse special articles</h3>
+                    <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button onclick="browseSpecialArticles('KVI')" class="rounded-xl border-2 border-rose-200 bg-rose-50 px-4 py-3 font-bold text-rose-800 hover:bg-rose-100">
+                            ⭐ View KVI Articles
+                        </button>
+                        <button onclick="browseSpecialArticles('POWER_SKU')" class="rounded-xl border-2 border-violet-200 bg-violet-50 px-4 py-3 font-bold text-violet-800 hover:bg-violet-100">
+                            ⚡ View Power SKU Articles
+                        </button>
+                    </div>
+                </div>
+
                 <div id="reader-container" class="hidden mt-4 bg-slate-900 p-3 rounded-2xl max-w-sm mx-auto text-center">
                     <div class="flex justify-between items-center text-white text-xs font-semibold mb-2 px-1">
                         <span>📷 Point camera at Barcode or QR Code</span>
@@ -4477,6 +4489,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
+            <div id="special-article-list" class="hidden"></div>
             <div id="price-result" class="hidden space-y-4"></div>
             <div id="print-status" class="hidden mt-3"></div>
         </div>
@@ -5116,6 +5129,100 @@ HTML_TEMPLATE = """
             }
         }
 
+        function renderSpecialArticleList(items, articleType) {
+            const list = document.getElementById('special-article-list');
+            list.classList.remove('hidden');
+            list.className = 'rounded-2xl border border-slate-200 bg-slate-50 p-4';
+            list.replaceChildren();
+
+            const title = document.createElement('h3');
+            title.className = 'text-lg font-extrabold text-slate-800';
+            title.textContent = `${articleType === 'KVI' ? 'KVI' : 'Power SKU'} Articles (${items.length})`;
+            list.appendChild(title);
+
+            if (items.length === 0) {
+                const empty = document.createElement('p');
+                empty.className = 'mt-2 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-800';
+                empty.textContent = 'Is category mein koi article nahi mila.';
+                list.appendChild(empty);
+                return;
+            }
+
+            const entries = document.createElement('div');
+            entries.className = 'mt-3 grid gap-2';
+            for (const item of items) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm hover:border-indigo-400 hover:bg-indigo-50';
+                button.addEventListener('click', () => openSpecialArticle(item.barcode));
+
+                const details = document.createElement('span');
+                details.className = 'min-w-0';
+                const name = document.createElement('span');
+                name.className = 'block truncate font-bold text-slate-800';
+                name.textContent = item.name || item.barcode;
+                const code = document.createElement('span');
+                code.className = 'mt-1 block text-xs text-slate-500';
+                code.textContent = `Article Code: ${item.barcode}`;
+                details.append(name, code);
+
+                const action = document.createElement('span');
+                action.className = 'shrink-0 rounded-lg bg-indigo-100 px-3 py-2 text-xs font-bold text-indigo-800';
+                action.textContent = 'View prices & print';
+                button.append(details, action);
+                entries.appendChild(button);
+            }
+            list.appendChild(entries);
+        }
+
+        async function browseSpecialArticles(articleType) {
+            const list = document.getElementById('special-article-list');
+            list.classList.remove('hidden');
+            list.className = 'rounded-2xl border border-slate-200 bg-slate-50 p-4';
+            list.textContent = 'Loading articles...';
+            try {
+                const loadLocalArticles = async () => {
+                    const db = await openLocalDB();
+                    return new Promise((resolve, reject) => {
+                        const transaction = db.transaction(STORE_NAME, 'readonly');
+                        const request = transaction.objectStore(STORE_NAME).getAll();
+                        request.onsuccess = () => resolve(request.result.filter(item => item.article_type === articleType));
+                        request.onerror = () => reject(request.error);
+                    });
+                };
+                let items = null;
+                if (navigator.onLine) {
+                    let response;
+                    try {
+                        response = await fetch(`/api/articles?type=${encodeURIComponent(articleType)}`, {cache: 'no-store'});
+                    } catch (error) {
+                        items = await loadLocalArticles();
+                    }
+                    if (response) {
+                        const data = await response.json();
+                        if (!response.ok || !data.success) {
+                            throw new Error(data.error || 'Unable to load articles.');
+                        }
+                        items = data.items;
+                    }
+                } else {
+                    items = await loadLocalArticles();
+                }
+                items.sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+                renderSpecialArticleList(items, articleType);
+            } catch (error) {
+                list.className = 'rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700';
+                list.textContent = `❌ ${error.message || 'Unable to load articles.'}`;
+            }
+        }
+
+        async function openSpecialArticle(articleCode) {
+            const input = document.getElementById('scan-input');
+            input.value = articleCode;
+            await searchArticle(articleCode);
+            document.getElementById('price-result').scrollIntoView({behavior: 'smooth', block: 'start'});
+        }
+
         function toggleCamera() {
             if (cameraActive) {
                 stopCamera();
@@ -5659,6 +5766,23 @@ def api_search():
             ).fetchall()
     items = [dict(r) for r in rows]
     return jsonify({"found": len(items) > 0, "items": items})
+
+
+@app.route("/api/articles")
+def api_articles():
+    article_type = str(request.args.get("type", "")).strip().upper()
+    if article_type not in {"KVI", "POWER_SKU"}:
+        return jsonify({"success": False, "error": "Unsupported article category"}), 400
+    with connect_db() as conn:
+        rows = conn.execute(
+            """SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag,
+                      article_type
+               FROM products
+               WHERE article_type = ?
+               ORDER BY name, barcode""",
+            (article_type,),
+        ).fetchall()
+    return jsonify({"success": True, "count": len(rows), "items": [dict(row) for row in rows]})
 
 
 @app.route("/api/print-jobs", methods=["POST"])

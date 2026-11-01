@@ -103,6 +103,9 @@ accepts an optional article-category column containing `POWER SKU`, `KVI`, or
 daily prices and can only be queued as `NORMAL_QR` or `NORMAL_QR_S3` to EPSON.
 The API enforces that special items print the selected current daily price and
 rejects other formats. Ordinary items continue to use Normal/S3.
+Employees can browse the KVI and Power SKU lists from the scanner screen. Selecting
+an article opens its current daily prices and the existing print action; the same
+category lists are available offline after the catalog has synced to the device.
 
 HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
