@@ -4295,7 +4295,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v9-printer-routing';
+const CACHE_NAME = 'store-price-portal-v10-laserjet-formats';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4464,18 +4464,14 @@ HTML_TEMPLATE = """
             <div class="p-5">
                 <h2 class="text-lg font-extrabold text-slate-800">Choose print format</h2>
                 <label for="print-target" class="mt-4 block text-sm font-semibold text-slate-700">Printer PC</label>
-                <select id="print-target" class="mt-1 w-full rounded-lg border border-slate-300 p-3">
+                <select id="print-target" onchange="renderPrintFormats()" class="mt-1 w-full rounded-lg border border-slate-300 p-3">
                     <option value="printer1">EPSON</option>
                     <option value="printer2">HP LaserJet</option>
                 </select>
+                <div id="print-format-options" class="mt-4 grid gap-3"></div>
                 <div class="mt-4 grid gap-3">
-                    <button onclick="queuePricePrint('THERMAL')" class="rounded-xl border-2 border-indigo-200 p-4 text-left hover:border-indigo-500 hover:bg-indigo-50">
-                        <span class="block font-bold text-slate-800">Normal</span>
-                        <span class="block text-sm text-slate-500">Print format: THERMAL</span>
-                    </button>
-                    <button onclick="queuePricePrint('S3')" class="rounded-xl border-2 border-emerald-200 p-4 text-left hover:border-emerald-500 hover:bg-emerald-50">
-                        <span class="block font-bold text-slate-800">A4(S3)</span>
-                        <span class="block text-sm text-slate-500">Print format: S3</span>
+                    <button id="print-submit" onclick="submitPricePrint()" class="w-full rounded-xl bg-indigo-600 p-3 font-bold text-white hover:bg-indigo-700">
+                        Print
                     </button>
                 </div>
                 <button onclick="document.getElementById('print-format-dialog').close()" class="mt-4 w-full rounded-lg py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
@@ -4897,10 +4893,41 @@ HTML_TEMPLATE = """
         }
 
         let pendingPrintPayload = null;
+        let selectedPrintFormat = null;
+        const PRINT_FORMAT_OPTIONS = {
+            printer1: [
+                {value: 'THERMAL', label: 'Normal'},
+                {value: 'S3', label: 'A4(S3)'}
+            ],
+            printer2: [
+                {value: 'DISCOUNT_A4', label: 'Discount A4'},
+                {value: 'NORMAL_A4_LANDSCAPE', label: 'Normal A4 Landscape'},
+                {value: 'NORMAL_A4_PORTRAIT', label: 'Normal A4 Portrait'},
+                {value: 'PROMOTION_A4', label: 'Promotion A4'},
+                {value: 'PROMOTION_A4_S3', label: 'Promotion A4 (S3)'}
+            ]
+        };
+
+        function renderPrintFormats() {
+            const printerId = document.getElementById('print-target').value;
+            const formats = PRINT_FORMAT_OPTIONS[printerId];
+            selectedPrintFormat = formats[0].value;
+            document.getElementById('print-format-options').innerHTML = formats.map((format, index) => `
+                <label class="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-slate-200 p-3 hover:border-indigo-400">
+                    <input type="radio" name="print-format" value="${format.value}" ${index === 0 ? 'checked' : ''} onchange="selectedPrintFormat=this.value">
+                    <span class="font-semibold text-slate-800">${format.label}</span>
+                </label>
+            `).join('');
+        }
 
         function selectPricePrint(encoded) {
             pendingPrintPayload = encoded;
+            renderPrintFormats();
             document.getElementById('print-format-dialog').showModal();
+        }
+
+        function submitPricePrint() {
+            queuePricePrint(selectedPrintFormat);
         }
 
         async function queuePricePrint(printFormat) {
@@ -4924,7 +4951,7 @@ HTML_TEMPLATE = """
 
             const status=document.getElementById('print-status');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
-            const formatLabel = printFormat === 'S3' ? 'A4(S3)' : 'Normal';
+            const formatLabel = PRINT_FORMAT_OPTIONS[printerId].find(format => format.value === printFormat).label;
             status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to ${printerLabel}...`;
             try {
                 const res=await fetch('/api/print-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ticket)});
@@ -5509,15 +5536,30 @@ def create_print_job():
     if copies < 1 or copies > 100:
         return jsonify({"success":False,"error":"Quantity must be between 1 and 100"}),400
     requested_format = str(data.get("print_format", "THERMAL")).strip().upper()
-    if requested_format in ("THERMAL", "NORMAL"):
-        print_format = "THERMAL"
-    elif requested_format in ("S3", "A4_S3"):
-        print_format = "S3"
-    else:
+    format_aliases = {
+        "NORMAL": "THERMAL",
+        "A4_S3": "S3",
+    }
+    print_format = format_aliases.get(requested_format, requested_format)
+    supported_formats = {
+        "THERMAL", "S3",
+        "DISCOUNT_A4", "NORMAL_A4_LANDSCAPE", "NORMAL_A4_PORTRAIT",
+        "PROMOTION_A4", "PROMOTION_A4_S3",
+    }
+    if print_format not in supported_formats:
         return jsonify({"success":False,"error":"Unsupported print format"}),400
     printer_id = str(data.get("printer_id", "printer1")).strip()
     if printer_id not in ("printer1", "printer2"):
         return jsonify({"success":False,"error":"Unsupported printer"}),400
+    printer_formats = {
+        "printer1": {"THERMAL", "S3"},
+        "printer2": {
+            "DISCOUNT_A4", "NORMAL_A4_LANDSCAPE", "NORMAL_A4_PORTRAIT",
+            "PROMOTION_A4", "PROMOTION_A4_S3",
+        },
+    }
+    if print_format not in printer_formats[printer_id]:
+        return jsonify({"success":False,"error":"Print format is not supported by this printer"}),400
     with connect_db() as conn:
         cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,printer_id,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,printer_id,datetime.now().isoformat(timespec='seconds')))
         job_id=cur.fetchone()["id"]

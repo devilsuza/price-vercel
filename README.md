@@ -78,6 +78,12 @@ The print dialog lets you choose **EPSON** (`printer1`) or **HP LaserJet**
 driver installed. The portal routes each queued job only to the matching
 bridge.
 
+EPSON offers `THERMAL` and `S3`. HP LaserJet offers `DISCOUNT_A4`,
+`NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
+`PROMOTION_A4_S3`. The selected ID is included as `print_format` in the
+queued job. The HP bridge must implement the matching layouts; this repository
+contains the portal/API, not the local bridge's page-layout or printing code.
+
 1. Keep `PRINT_BRIDGE_KEY` configured in Vercel and configure the same key in
    both bridge installations. Do not share or commit the key publicly.
 2. On the existing PC, keep the current bridge setup. If its bridge supports
