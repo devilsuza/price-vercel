@@ -85,6 +85,9 @@ def init_db():
                 price_emb TEXT DEFAULT '',
                 price_pc_kgm TEXT DEFAULT '',
                 price_bag TEXT DEFAULT '',
+                article_type TEXT NOT NULL DEFAULT 'NORMAL',
+                list_price TEXT DEFAULT '',
+                list_price_unit TEXT NOT NULL DEFAULT 'UN',
                 updated_at TEXT
             )
         """)
@@ -99,9 +102,13 @@ def init_db():
             existing_cols = [
                 row["name"] for row in conn.execute("PRAGMA table_info(products)").fetchall()
             ]
-        for col in ["price_cx", "price_emb", "price_pc_kgm", "price_bag", "updated_at"]:
+        for col in [
+            "price_cx", "price_emb", "price_pc_kgm", "price_bag",
+            "article_type", "list_price", "list_price_unit", "updated_at",
+        ]:
             if col not in existing_cols:
-                conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT ''")
+                default = "NORMAL" if col == "article_type" else "UN" if col == "list_price_unit" else ""
+                conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT NOT NULL DEFAULT '{default}'")
 
         # One article can have multiple EAN/barcodes. This table resolves every EAN
         # back to the single master article stored in products.
@@ -4258,6 +4265,20 @@ def clean_barcode(val):
     return s
 
 
+def normalize_article_type(value):
+    normalized = str(value or "").strip().upper().replace("-", " ").replace("_", " ")
+    normalized = " ".join(normalized.split())
+    if not normalized:
+        return ""
+    if normalized in {"POWER", "POWER SKU", "POWERSKU"}:
+        return "POWER_SKU"
+    if normalized == "KVI":
+        return "KVI"
+    if normalized in {"NORMAL", "REGULAR", "STANDARD"}:
+        return "NORMAL"
+    raise ValueError(f"Unsupported article category: {value}")
+
+
 def format_price(val):
     if val is None or pd.isna(val):
         return ""
@@ -4295,7 +4316,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v10-laserjet-formats';
+const CACHE_NAME = 'store-price-portal-v11-kvi-power-sku';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4504,12 +4525,28 @@ HTML_TEMPLATE = """
                     <div id="price-upload-status" class="mt-3 text-sm font-medium hidden"></div>
                 </div>
             </div>
+            <div class="bg-white p-6 rounded-2xl shadow-md border-2 border-violet-200">
+                <h2 class="text-xl font-bold text-slate-800">1C. Power SKU / KVI List Price Upload</h2>
+                <p class="text-sm text-slate-500 mt-1">Separate Excel files upload karein. Article Code aur List Price zaroori hain; optional EAN, name aur UOM bhi map kar sakte hain. In articles ka print NORMAL_QR par hi hoga.</p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+                    <div>
+                        <input type="file" id="power-sku-excel-file" accept=".xlsx,.xls,.csv" class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 border border-slate-200 rounded-xl p-1.5">
+                        <button onclick="uploadForPreview('power_sku')" class="mt-2 w-full bg-violet-600 hover:bg-violet-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow">⚡ Read Power SKU File</button>
+                        <div id="power-sku-upload-status" class="mt-2 text-sm font-medium hidden"></div>
+                    </div>
+                    <div>
+                        <input type="file" id="kvi-excel-file" accept=".xlsx,.xls,.csv" class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-rose-50 file:text-rose-700 border border-slate-200 rounded-xl p-1.5">
+                        <button onclick="uploadForPreview('kvi')" class="mt-2 w-full bg-rose-600 hover:bg-rose-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow">⭐ Read KVI File</button>
+                        <div id="kvi-upload-status" class="mt-2 text-sm font-medium hidden"></div>
+                    </div>
+                </div>
+            </div>
             <div class="flex justify-end"><span class="bg-indigo-50 text-indigo-700 text-xs font-bold px-3 py-1.5 rounded-full border border-indigo-200" id="total-count-badge">Total Articles in DB: {{ total_products }}</span></div>
             <!-- Step 2: Dynamic Tab & Column Mapping -->
             <div id="mapping-section" class="hidden bg-white p-6 rounded-2xl shadow-md border border-slate-200 space-y-5">
                 <div>
                     <h2 class="text-xl font-bold text-slate-800">2. Select Columns for Each Tab</h2>
-                    <p class="text-sm text-slate-500">Map Barcode, Article Name, and the 4 Price columns (CX, EMB, PC/KGM, BAG).</p>
+                    <p class="text-sm text-slate-500">Map article code, name, four prices, and optional classification/List Price columns. Power SKU/KVI files require a List Price column.</p>
                 </div>
 
                 <div id="tabs-container" class="space-y-6"></div>
@@ -4882,8 +4919,15 @@ HTML_TEMPLATE = """
 
         function renderPriceBox(label, subLabel, value, colorClass, item, priceType) {
             const hasPrice = value && String(value).trim() !== "";
-            const units = {cx:'CX', emb:'EMB', pc_kgm:'UN', bag:'BAG'};
-            const payload = encodeURIComponent(JSON.stringify({article_code:(item.article_code || item.barcode),item_name:item.name,price:value,unit:units[priceType]||'UN'}));
+            const units = {cx:'CX', emb:'EMB', pc_kgm:'UN', bag:'BAG', list_price:item.list_price_unit||'UN'};
+            const articleType = item.article_type || 'NORMAL';
+            const payload = encodeURIComponent(JSON.stringify({
+                article_code:(item.article_code || item.barcode),
+                item_name:item.name,
+                price:value,
+                unit:units[priceType]||'UN',
+                article_type:articleType
+            }));
             return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}')"` : 'disabled'} class="w-full ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-4 text-center shadow-sm transition">
                 <span class="text-xs font-extrabold uppercase tracking-wider block text-slate-600">${label}</span>
                 <span class="text-[11px] text-slate-500 block mb-1">${subLabel} · ${units[priceType]||''}</span>
@@ -4897,7 +4941,6 @@ HTML_TEMPLATE = """
         const PRINT_FORMAT_OPTIONS = {
             printer1: [
                 {value: 'THERMAL', label: 'Normal'},
-                {value: 'NORMAL_QR', label: 'NORMAL_QR'},
                 {value: 'S3', label: 'A4(S3)'}
             ],
             printer2: [
@@ -4911,7 +4954,20 @@ HTML_TEMPLATE = """
 
         function renderPrintFormats() {
             const printerId = document.getElementById('print-target').value;
-            const formats = PRINT_FORMAT_OPTIONS[printerId];
+            const ticket = pendingPrintPayload
+                ? JSON.parse(decodeURIComponent(pendingPrintPayload))
+                : null;
+            const requiresQr = ['POWER_SKU', 'KVI'].includes(ticket?.article_type);
+            const printerSelect = document.getElementById('print-target');
+            if (requiresQr) {
+                printerSelect.value = 'printer1';
+                printerSelect.disabled = true;
+            } else {
+                printerSelect.disabled = false;
+            }
+            const formats = requiresQr
+                ? [{value: 'NORMAL_QR', label: 'NORMAL_QR (Required)'}]
+                : PRINT_FORMAT_OPTIONS[printerSelect.value || printerId];
             selectedPrintFormat = formats[0].value;
             document.getElementById('print-format-options').innerHTML = formats.map((format, index) => `
                 <label class="flex cursor-pointer items-center gap-3 rounded-xl border-2 border-slate-200 p-3 hover:border-indigo-400">
@@ -4923,6 +4979,7 @@ HTML_TEMPLATE = """
 
         function selectPricePrint(encoded) {
             pendingPrintPayload = encoded;
+            document.getElementById('print-target').disabled = false;
             renderPrintFormats();
             document.getElementById('print-format-dialog').showModal();
         }
@@ -4933,6 +4990,8 @@ HTML_TEMPLATE = """
 
         async function queuePricePrint(printFormat) {
             const ticket=JSON.parse(decodeURIComponent(pendingPrintPayload));
+            const requiresQr = ['POWER_SKU', 'KVI'].includes(ticket.article_type);
+            if (requiresQr) printFormat = 'NORMAL_QR';
             pendingPrintPayload = null;
             document.getElementById('print-format-dialog').close();
 
@@ -4948,11 +5007,13 @@ HTML_TEMPLATE = """
             ticket.print_format = printFormat;
             const printerId = document.getElementById('print-target').value;
             const printerLabel = printerId === 'printer2' ? 'HP LaserJet' : 'EPSON';
-            ticket.printer_id = printerId;
+            ticket.printer_id = requiresQr ? 'printer1' : printerId;
 
             const status=document.getElementById('print-status');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
-            const formatLabel = PRINT_FORMAT_OPTIONS[printerId].find(format => format.value === printFormat).label;
+            const formatLabel = requiresQr
+                ? 'NORMAL_QR'
+                : PRINT_FORMAT_OPTIONS[printerId].find(format => format.value === printFormat).label;
             status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to ${printerLabel}...`;
             try {
                 const res=await fetch('/api/print-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ticket)});
@@ -4991,6 +5052,9 @@ HTML_TEMPLATE = """
                                 <span class="text-xs font-extrabold uppercase tracking-wider bg-indigo-100 text-indigo-800 px-3 py-1 rounded-lg">
                                     Article Code: ${item.article_code || item.barcode}
                                 </span>
+                                <span class="text-xs font-extrabold uppercase tracking-wider ${item.article_type === 'KVI' ? 'bg-rose-100 text-rose-800' : item.article_type === 'POWER_SKU' ? 'bg-violet-100 text-violet-800' : 'bg-slate-100 text-slate-700'} px-3 py-1 rounded-lg">
+                                    ${item.article_type === 'POWER_SKU' ? 'POWER SKU' : item.article_type || 'NORMAL'}
+                                </span>
                                 <span class="text-[11px] font-semibold px-2.5 py-0.5 rounded-md ${sourceLabel.includes('Offline') ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}">
                                     ${sourceLabel}
                                 </span>
@@ -5000,10 +5064,12 @@ HTML_TEMPLATE = """
                     </div>
 
                     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-                        ${renderPriceBox('Price', '1', item.price_cx, 'bg-emerald-50 border-emerald-400', item, 'cx')}
-                        ${renderPriceBox('Price', '2', item.price_emb, 'bg-blue-50 border-blue-400', item, 'emb')}
-                        ${renderPriceBox('Price', '3', item.price_pc_kgm, 'bg-amber-50 border-amber-400', item, 'pc_kgm')}
-                        ${renderPriceBox('Price', '4', item.price_bag, 'bg-purple-50 border-purple-400', item, 'bag')}
+                        ${['POWER_SKU', 'KVI'].includes(item.article_type)
+                            ? renderPriceBox('List Price', 'Special Article', item.list_price, 'bg-violet-50 border-violet-400', item, 'list_price')
+                            : `${renderPriceBox('Price', '1', item.price_cx, 'bg-emerald-50 border-emerald-400', item, 'cx')}
+                               ${renderPriceBox('Price', '2', item.price_emb, 'bg-blue-50 border-blue-400', item, 'emb')}
+                               ${renderPriceBox('Price', '3', item.price_pc_kgm, 'bg-amber-50 border-amber-400', item, 'pc_kgm')}
+                               ${renderPriceBox('Price', '4', item.price_bag, 'bg-purple-50 border-purple-400', item, 'bag')}`}
                     </div>
                 </div>
             `).join('');
@@ -5192,8 +5258,15 @@ HTML_TEMPLATE = """
                 alert("❌ Excel upload karne ke liye internet connection chahiye.");
                 return;
             }
-            const fileInput = document.getElementById(mode === "master" ? 'master-excel-file' : 'price-excel-file');
-            const statusEl = document.getElementById(mode === "master" ? 'master-upload-status' : 'price-upload-status');
+            const uploadControls = {
+                master: ['master-excel-file', 'master-upload-status'],
+                price: ['price-excel-file', 'price-upload-status'],
+                power_sku: ['power-sku-excel-file', 'power-sku-upload-status'],
+                kvi: ['kvi-excel-file', 'kvi-upload-status']
+            };
+            const [fileInputId, statusId] = uploadControls[mode] || uploadControls.master;
+            const fileInput = document.getElementById(fileInputId);
+            const statusEl = document.getElementById(statusId);
             if (!fileInput.files.length) {
                 alert("Please select an Excel file first.");
                 return;
@@ -5241,16 +5314,24 @@ HTML_TEMPLATE = """
         function renderTabMappings(tabs, mode) {
             const section = document.getElementById('mapping-section');
             const container = document.getElementById('tabs-container');
+            const isMaster = mode === "master";
+            const isSpecialUpload = mode === "power_sku" || mode === "kvi";
             section.classList.remove('hidden');
 
             container.innerHTML = tabs.map((tab) => {
-                const barcodeGuess = guessColumn(tab.columns, mode === "master" ? ['article code', 'article', 'artigo', 'sku', 'item code', 'code', 'cod'] : ['ean', 'barcode', 'code', 'cod', 'sku', 'art', 'id']);
+                const codeColumns = tab.columns.filter(column => !/(type|category|classification)/i.test(column));
+                const barcodeGuess = guessColumn(codeColumns, isMaster || isSpecialUpload ? ['article code', 'article', 'artigo', 'sku', 'item code', 'code', 'cod'] : ['ean', 'barcode', 'code', 'cod', 'sku', 'art', 'id']);
                 const eanGuess = guessColumn(tab.columns, ['ean', 'barcode', 'gtin', 'upc']);
-                const nameGuess = guessColumn(tab.columns, ['name', 'desc', 'product', 'article', 'item', 'nome']);
+                const nameColumns = tab.columns.filter(column => !/(code|barcode|sku|type|category|classification)/i.test(column));
+                const nameGuess = guessColumn(nameColumns, ['name', 'desc', 'product', 'article', 'item', 'nome']);
                 const cxGuess = guessColumn(tab.columns, ['cx', 'caixa', 'box', 'carton']);
                 const embGuess = guessColumn(tab.columns, ['emb', 'pack', 'pct', 'fardo']);
-                const pcGuess = guessColumn(tab.columns, ['pc', 'kgm', 'kg', 'un', 'unit', 'price', 'preco', 'preço']);
+                const pcColumns = tab.columns.filter(column => !/(list|retail)/i.test(column));
+                const pcGuess = guessColumn(pcColumns, ['pc', 'kgm', 'kg', 'un', 'unit', 'price', 'preco', 'preço']);
                 const bagGuess = guessColumn(tab.columns, ['bag', 'saco', 'sc']);
+                const listPriceGuess = guessColumn(tab.columns, ['list price', 'list_price', 'listprice', 'retail price', 'price list', 'preco lista', 'preço lista']);
+                const articleTypeGuess = guessColumn(tab.columns, ['article type', 'sku type', 'classification', 'category', 'type']);
+                const listPriceUnitGuess = guessColumn(tab.columns, ['list price uom', 'list uom', 'uom', 'unit of measure']);
 
                 const makeOptions = (selectedVal, placeholderText) => {
                     let opts = `<option value="">${placeholderText}</option>`;
@@ -5273,19 +5354,19 @@ HTML_TEMPLATE = """
 
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                         <div>
-                            <label class="block text-xs font-bold uppercase text-slate-700 mb-1">${mode === "master" ? "Master Article Code *" : "Article Code / Any EAN *"}</label>
+                            <label class="block text-xs font-bold uppercase text-slate-700 mb-1">${isMaster || isSpecialUpload ? "Master Article Code *" : "Article Code / Any EAN *"}</label>
                             <select class="col-barcode w-full p-2.5 bg-white border-2 border-indigo-200 rounded-lg font-medium text-sm">
                                 ${makeOptions(barcodeGuess, '-- Select Barcode Column --')}
                             </select>
                         </div>
-                        <div class="${mode === 'master' ? '' : 'hidden'}">
+                        <div class="${isMaster || isSpecialUpload ? '' : 'hidden'}">
                             <label class="block text-xs font-bold uppercase text-slate-700 mb-1">EAN / Barcode Column</label>
                             <select class="col-ean w-full p-2.5 bg-white border-2 border-indigo-200 rounded-lg font-medium text-sm">
                                 ${makeOptions(eanGuess, '-- Optional EAN Column --')}
                             </select>
                         </div>
                         <div>
-                            <label class="block text-xs font-bold uppercase text-slate-700 mb-1">Article Name ${mode === "master" ? "" : "(Optional)"}</label>
+                            <label class="block text-xs font-bold uppercase text-slate-700 mb-1">Article Name ${isMaster ? "" : "(Optional)"}</label>
                             <select class="col-name w-full p-2.5 bg-white border-2 border-indigo-200 rounded-lg font-medium text-sm">
                                 ${makeOptions(nameGuess, '-- Select Name Column --')}
                             </select>
@@ -5315,6 +5396,27 @@ HTML_TEMPLATE = """
                             <label class="block text-xs font-bold uppercase text-purple-700 mb-1">Price</label>
                             <select class="col-price-bag w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-sm">
                                 ${makeOptions(bagGuess, '-- None / Skip --')}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4 bg-violet-50 p-4 rounded-xl border border-violet-200">
+                        <div class="${isMaster ? '' : 'hidden'}">
+                            <label class="block text-xs font-bold uppercase text-violet-800 mb-1">Article Category Column (Optional)</label>
+                            <select class="col-article-type w-full p-2 bg-white border border-violet-300 rounded-lg text-sm">
+                                ${makeOptions(articleTypeGuess, '-- None / Keep Existing --')}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold uppercase text-violet-800 mb-1">List Price ${isSpecialUpload ? '*' : '(Optional)'}</label>
+                            <select class="col-list-price w-full p-2 bg-white border border-violet-300 rounded-lg text-sm">
+                                ${makeOptions(listPriceGuess, '-- None / Skip --')}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold uppercase text-violet-800 mb-1">List Price UOM (Optional)</label>
+                            <select class="col-list-price-unit w-full p-2 bg-white border border-violet-300 rounded-lg text-sm">
+                                ${makeOptions(listPriceUnitGuess, '-- Default UN --')}
                             </select>
                         </div>
                     </div>
@@ -5352,6 +5454,9 @@ HTML_TEMPLATE = """
                 const priceEmbCol = card.querySelector('.col-price-emb').value;
                 const pricePcCol = card.querySelector('.col-price-pc').value;
                 const priceBagCol = card.querySelector('.col-price-bag').value;
+                const articleTypeCol = card.querySelector('.col-article-type').value;
+                const listPriceCol = card.querySelector('.col-list-price').value;
+                const listPriceUnitCol = card.querySelector('.col-list-price-unit').value;
 
                 if (!barcodeCol) {
                     alert(`Please select ${currentUploadMode === "master" ? "Master Article Code" : "Article Code / EAN"} column for tab: "${sheetName}"`);
@@ -5366,7 +5471,10 @@ HTML_TEMPLATE = """
                     price_cx_col: priceCxCol,
                     price_emb_col: priceEmbCol,
                     price_pc_col: pricePcCol,
-                    price_bag_col: priceBagCol
+                    price_bag_col: priceBagCol,
+                    article_type_col: articleTypeCol,
+                    list_price_col: listPriceCol,
+                    list_price_unit_col: listPriceUnitCol
                 });
             }
 
@@ -5374,10 +5482,27 @@ HTML_TEMPLATE = """
                 alert("Please select at least one tab to import.");
                 return;
             }
+            if (['power_sku', 'kvi'].includes(currentUploadMode)
+                && mappings.some(mapping => !mapping.list_price_col)) {
+                alert("Please select the List Price column for every enabled tab.");
+                return;
+            }
 
             const btn = document.getElementById('btn-confirm-import');
             btn.disabled = true;
-            btn.innerText = currentUploadMode === "master" ? "⏳ Merging Master & EANs..." : "⏳ Updating Only Uploaded Prices...";
+            const importLabels = {
+                master: '⏳ Merging Master & EANs...',
+                price: '⏳ Updating Only Uploaded Prices...',
+                power_sku: '⏳ Importing Power SKU List Prices...',
+                kvi: '⏳ Importing KVI List Prices...'
+            };
+            const importButtonLabels = {
+                master: '✅ Merge Master Data',
+                price: '✅ Update Daily Prices',
+                power_sku: '⚡ Import Power SKU',
+                kvi: '⭐ Import KVI'
+            };
+            btn.innerText = importLabels[currentUploadMode] || importLabels.master;
 
             try {
                 const res = await fetch("/api/import-mapped", {
@@ -5386,13 +5511,16 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({
                         temp_filename: currentTempFile,
                         mappings: mappings,
-                        import_mode: currentUploadMode
+                        import_mode: currentUploadMode,
+                        default_article_type: currentUploadMode === "power_sku"
+                            ? "POWER_SKU"
+                            : currentUploadMode === "kvi" ? "KVI" : ""
                     })
                 });
                 const data = await res.json();
 
                 btn.disabled = false;
-                btn.innerText = currentUploadMode === "master" ? "✅ Merge Master Data" : "✅ Update Daily Prices";
+                btn.innerText = importButtonLabels[currentUploadMode] || importButtonLabels.master;
 
                 if (data.success) {
                     await syncDatabaseInBackground(false);
@@ -5412,7 +5540,7 @@ HTML_TEMPLATE = """
                 }
             } catch (err) {
                 btn.disabled = false;
-                btn.innerText = currentUploadMode === "master" ? "✅ Merge Master Data" : "✅ Update Daily Prices";
+                btn.innerText = importButtonLabels[currentUploadMode] || importButtonLabels.master;
                 alert("❌ Failed to merge data.");
             }
         }
@@ -5449,13 +5577,15 @@ def api_sync_all():
         ).fetchone()["total"]
         if canonical_only:
             rows = conn.execute(
-                "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag, updated_at FROM products"
+                "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag, "
+                "article_type, list_price, list_price_unit, updated_at FROM products"
             ).fetchall()
             items = [dict(r) for r in rows]
         else:
             rows = conn.execute("""
                 SELECT e.ean_code AS search_key, p.barcode, p.name, p.price_cx, p.price_emb,
-                       p.price_pc_kgm, p.price_bag, p.updated_at
+                       p.price_pc_kgm, p.price_bag, p.article_type, p.list_price,
+                       p.list_price_unit, p.updated_at
                 FROM products p JOIN ean_aliases e ON e.article_code = p.barcode
             """).fetchall()
             items = []
@@ -5510,13 +5640,16 @@ def api_search():
         resolved = conn.execute("SELECT article_code FROM ean_aliases WHERE ean_code = ?", (q,)).fetchone()
         article_code = resolved["article_code"] if resolved else q
         rows = conn.execute(
-            "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag FROM products WHERE barcode = ?",
+            "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag, "
+            "article_type, list_price, list_price_unit FROM products WHERE barcode = ?",
             (article_code,),
         ).fetchall()
         if not rows:
             like_q = f"%{q}%"
             rows = conn.execute(
-                """SELECT DISTINCT p.barcode, p.name, p.price_cx, p.price_emb, p.price_pc_kgm, p.price_bag
+                """SELECT DISTINCT p.barcode, p.name, p.price_cx, p.price_emb,
+                          p.price_pc_kgm, p.price_bag, p.article_type, p.list_price,
+                          p.list_price_unit
                    FROM products p LEFT JOIN ean_aliases e ON e.article_code = p.barcode
                    WHERE p.name LIKE ? OR p.barcode LIKE ? OR e.ean_code LIKE ? LIMIT 15""",
                 (like_q, like_q, like_q),
@@ -5553,15 +5686,42 @@ def create_print_job():
     if printer_id not in ("printer1", "printer2"):
         return jsonify({"success":False,"error":"Unsupported printer"}),400
     printer_formats = {
-        "printer1": {"THERMAL", "NORMAL_QR", "S3"},
+        "printer1": {"THERMAL", "S3"},
         "printer2": {
             "DISCOUNT_A4", "NORMAL_A4_LANDSCAPE", "NORMAL_A4_PORTRAIT",
             "PROMOTION_A4", "PROMOTION_A4_S3",
         },
     }
-    if print_format not in printer_formats[printer_id]:
+    if print_format not in printer_formats[printer_id] and print_format != "NORMAL_QR":
         return jsonify({"success":False,"error":"Print format is not supported by this printer"}),400
     with connect_db() as conn:
+        requested_code = str(data["article_code"])
+        alias = conn.execute(
+            "SELECT article_code FROM ean_aliases WHERE ean_code = ?", (requested_code,)
+        ).fetchone()
+        article_code = alias["article_code"] if alias else requested_code
+        product = conn.execute(
+            "SELECT barcode, name, article_type, list_price, list_price_unit "
+            "FROM products WHERE barcode = ?",
+            (article_code,),
+        ).fetchone()
+        article_type = product["article_type"] if product else "NORMAL"
+        is_special_article = article_type in {"POWER_SKU", "KVI"}
+        if is_special_article:
+            if print_format != "NORMAL_QR" or printer_id != "printer1":
+                return jsonify({
+                    "success":False,
+                    "error":"Power SKU and KVI articles can only be printed as NORMAL_QR on EPSON",
+                }),400
+            if not str(product["list_price"] or "").strip():
+                return jsonify({"success":False,"error":"List Price is missing for this article"}),400
+            data["article_code"] = product["barcode"]
+            data["item_name"] = product["name"]
+            data["price"] = product["list_price"]
+            data["unit"] = product["list_price_unit"] or "UN"
+        elif print_format == "NORMAL_QR":
+            return jsonify({"success":False,"error":"NORMAL_QR is reserved for Power SKU and KVI articles"}),400
+
         cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,printer_id,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,printer_id,datetime.now().isoformat(timespec='seconds')))
         job_id=cur.fetchone()["id"]
         conn.commit()
@@ -5727,10 +5887,20 @@ def import_mapped():
     temp_filename = data.get("temp_filename")
     mappings = data.get("mappings", [])
     import_mode = data.get("import_mode", "master")
-    if import_mode not in ("master", "price"):
+    if import_mode not in ("master", "price", "power_sku", "kvi"):
         return jsonify({"success": False, "error": "Invalid import mode"}), 400
     if not temp_filename or not mappings:
         return jsonify({"success": False, "error": "Missing file or column mappings"}), 400
+    try:
+        default_article_type = normalize_article_type(data.get("default_article_type", ""))
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    if import_mode in ("power_sku", "kvi"):
+        expected_type = "POWER_SKU" if import_mode == "power_sku" else "KVI"
+        if default_article_type != expected_type:
+            return jsonify({"success": False, "error": "Upload category does not match import mode"}), 400
+        if any(not mapping.get("list_price_col") for mapping in mappings):
+            return jsonify({"success": False, "error": "List Price column is required"}), 400
 
     # Prevent path traversal: browser may only reference a generated temp filename.
     temp_filename = os.path.basename(temp_filename)
@@ -5775,6 +5945,9 @@ def import_mapped():
                 emb_col = m.get("price_emb_col", "")
                 pc_col = m.get("price_pc_col", "")
                 bag_col = m.get("price_bag_col", "")
+                article_type_col = m.get("article_type_col", "")
+                list_price_col = m.get("list_price_col", "")
+                list_price_unit_col = m.get("list_price_unit_col", "")
                 df = pd.read_csv(filepath, dtype=str) if ext == ".csv" else pd.read_excel(filepath, sheet_name=sheet, dtype=str)
                 df = df.dropna(how="all")
 
@@ -5791,11 +5964,21 @@ def import_mapped():
                         "price_pc_kgm": format_price(row.get(pc_col)) if pc_col else "",
                         "price_bag": format_price(row.get(bag_col)) if bag_col else "",
                     }
+                    raw_article_type = clean_barcode(row.get(article_type_col)) if article_type_col else ""
+                    article_type = default_article_type or normalize_article_type(raw_article_type)
+                    list_price = format_price(row.get(list_price_col)) if list_price_col else ""
+                    list_price_unit = clean_barcode(row.get(list_price_unit_col)).upper() if list_price_unit_col else ""
                     records.append({
                         "code": uploaded_code,
                         "name": name,
                         "prices": prices,
                         "eans": split_eans(row.get(ean_col)) if ean_col else [],
+                        "article_type": article_type,
+                        "article_type_provided": bool(default_article_type or raw_article_type),
+                        "list_price": list_price,
+                        "list_price_provided": bool(list_price),
+                        "list_price_unit": list_price_unit,
+                        "list_price_unit_provided": bool(list_price_unit),
                     })
 
                 if import_mode == "price":
@@ -5844,6 +6027,15 @@ def import_mapped():
                         conn.executemany(update_sql, batch)
                     continue
 
+                if import_mode in ("power_sku", "kvi"):
+                    kept_records = []
+                    for record in records:
+                        if not record["list_price"]:
+                            skipped += 1
+                            continue
+                        kept_records.append(record)
+                    records = kept_records
+
                 article_codes = [record["code"] for record in records]
                 existing_rows = find_values(
                     "SELECT barcode FROM products WHERE barcode IN",
@@ -5862,7 +6054,11 @@ def import_mapped():
                     product_rows.append((
                         article_code, stored_name, prices["price_cx"],
                         prices["price_emb"], prices["price_pc_kgm"],
-                        prices["price_bag"], now_str,
+                        prices["price_bag"], record["article_type"] or "NORMAL",
+                        record["list_price"], record["list_price_unit"] or "UN",
+                        now_str, int(record["article_type_provided"]),
+                        int(record["list_price_provided"]),
+                        int(record["list_price_unit_provided"]),
                     ))
                     if existed:
                         existing_updated += 1
@@ -5878,14 +6074,18 @@ def import_mapped():
 
                 product_sql = """
                     INSERT INTO products
-                      (barcode,name,price_cx,price_emb,price_pc_kgm,price_bag,updated_at)
-                    VALUES(?,?,?,?,?,?,?)
+                      (barcode,name,price_cx,price_emb,price_pc_kgm,price_bag,
+                       article_type,list_price,list_price_unit,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(barcode) DO UPDATE SET
                       name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE products.name END,
                       price_cx=CASE WHEN excluded.price_cx<>'' THEN excluded.price_cx ELSE products.price_cx END,
                       price_emb=CASE WHEN excluded.price_emb<>'' THEN excluded.price_emb ELSE products.price_emb END,
                       price_pc_kgm=CASE WHEN excluded.price_pc_kgm<>'' THEN excluded.price_pc_kgm ELSE products.price_pc_kgm END,
                       price_bag=CASE WHEN excluded.price_bag<>'' THEN excluded.price_bag ELSE products.price_bag END,
+                      article_type=CASE WHEN ?=1 THEN excluded.article_type ELSE products.article_type END,
+                      list_price=CASE WHEN ?=1 THEN excluded.list_price ELSE products.list_price END,
+                      list_price_unit=CASE WHEN ?=1 THEN excluded.list_price_unit ELSE products.list_price_unit END,
                       updated_at=excluded.updated_at
                 """
                 alias_sql = """
@@ -5908,6 +6108,8 @@ def import_mapped():
             pass
         return jsonify({"success": True, "new_added": new_added, "existing_updated": existing_updated,
                         "ean_linked": ean_linked, "skipped": skipped, "total_products": total_products})
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

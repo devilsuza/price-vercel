@@ -89,6 +89,17 @@ Windows `printer_name`. Do not commit the real bridge key. Install the bridge
 dependencies on the printer PC with `py -m pip install Pillow pywin32
 "qrcode[pil]"`, then start it with `run_epson_bridge.bat`.
 
+### Power SKU and KVI articles
+
+Managers can import separate Power SKU and KVI spreadsheets from **1C. Power
+SKU / KVI List Price Upload**. Map the article code and List Price; name, EAN,
+and List Price UOM are optional. The existing Master upload also accepts an
+optional article-category column containing `POWER SKU`, `KVI`, or `NORMAL`,
+plus an optional List Price column. These values are included in online and
+offline search results. Scanned Power SKU/KVI articles display their category
+and List Price; they can only be queued as `NORMAL_QR` to EPSON. The API also
+enforces this rule, so ordinary articles remain on the Normal/S3 formats.
+
 HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
 `PROMOTION_A4_S3`. The selected ID is included as `print_format` in the
