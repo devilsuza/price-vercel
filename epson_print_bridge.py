@@ -113,6 +113,30 @@ def draw_product_name(draw, name, max_width, top, max_lines=2):
         draw.text((12, top + index * 27), line, font=text_font, fill=0)
 
 
+def make_qr_image(job, size):
+    try:
+        import qrcode
+    except ImportError as exc:
+        raise RuntimeError(
+            "QR formats need qrcode. Install it with: py -m pip install qrcode[pil]"
+        ) from exc
+    qr_value = str(
+        job.get("qr_url")
+        or job.get("app_url")
+        or job.get("portal_url")
+        or DEFAULT_QR_URL
+    ).strip()
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=3,
+        border=1,
+    )
+    qr.add_data(qr_value)
+    qr.make(fit=True)
+    qr_image = qr.make_image(fill_color="black", back_color="white").convert("1")
+    return qr_image.resize((size, size), Image.Resampling.NEAREST)
+
+
 def make_ticket(job, include_qr=False):
     image = Image.new("1", NORMAL_SIZE, 1)
     draw = ImageDraw.Draw(image)
@@ -133,36 +157,18 @@ def make_ticket(job, include_qr=False):
     )
 
     if include_qr:
-        try:
-            import qrcode
-        except ImportError as exc:
-            raise RuntimeError(
-                "NORMAL_QR needs qrcode. Install it with: py -m pip install qrcode[pil]"
-            ) from exc
-        qr_value = str(
-            job.get("qr_url")
-            or job.get("app_url")
-            or job.get("portal_url")
-            or DEFAULT_QR_URL
-        ).strip()
-        qr = qrcode.QRCode(
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=3,
-            border=1,
-        )
-        qr.add_data(qr_value)
-        qr.make(fit=True)
-        qr_image = qr.make_image(fill_color="black", back_color="white").convert("1")
-        qr_image = qr_image.resize((70, 70), Image.Resampling.NEAREST)
-        image.paste(qr_image, (407, 7))
+        image.paste(make_qr_image(job, 70), (407, 7))
     return image
 
 
-def make_s3_ticket(job):
+def make_s3_ticket(job, include_qr=False):
     image = Image.new("1", S3_SIZE, 1)
     draw = ImageDraw.Draw(image)
     draw.rectangle((1, 1, S3_SIZE[0] - 2, S3_SIZE[1] - 2), outline=0, width=2)
-    draw_product_name(draw, job.get("item_name"), S3_SIZE[0] - 36, 20, max_lines=3)
+    product_width = S3_SIZE[0] - 154 if include_qr else S3_SIZE[0] - 36
+    draw_product_name(draw, job.get("item_name"), product_width, 20, max_lines=3)
+    if include_qr:
+        image.paste(make_qr_image(job, 104), (S3_SIZE[0] - 126, 16))
 
     price, unit = price_and_unit(job)
     price_font = fit_font(draw, price, 500, 112, 62, True)
@@ -213,7 +219,9 @@ def print_job(job, printer_name):
     mode = re.sub(
         r"[^A-Z0-9]", "", str(job.get("print_format", "THERMAL")).upper()
     )
-    if mode in {"NORMALQR", "QRNORMAL", "NORMALQRCODE", "QR"}:
+    if mode in {"NORMALQRS3", "QRS3NORMAL", "S3NORMALQR"}:
+        image = make_s3_ticket(job, include_qr=True)
+    elif mode in {"NORMALQR", "QRNORMAL", "NORMALQRCODE", "QR"}:
         image = make_ticket(job, include_qr=True)
     elif mode in {"S3", "A6S3", "S3A6", "POSTCARDS3"}:
         image = make_s3_ticket(job)

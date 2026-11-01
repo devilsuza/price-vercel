@@ -4316,7 +4316,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v11-kvi-power-sku';
+const CACHE_NAME = 'store-price-portal-v12-normal-qr-s3';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4527,7 +4527,7 @@ HTML_TEMPLATE = """
             </div>
             <div class="bg-white p-6 rounded-2xl shadow-md border-2 border-violet-200">
                 <h2 class="text-xl font-bold text-slate-800">1C. Power SKU / KVI Article List Upload</h2>
-                <p class="text-sm text-slate-500 mt-1">Yahan sirf Power SKU/KVI article list upload karein (Article Code required, EAN/Name optional). Price Daily Price Update se aayega; nayi list purani category list ko replace karegi. In articles ka print NORMAL_QR par hi hoga.</p>
+                <p class="text-sm text-slate-500 mt-1">Yahan sirf Power SKU/KVI article list upload karein (Article Code required, EAN/Name optional). Price Daily Price Update se aayega; nayi list purani category list ko replace karegi. In articles ka print NORMAL_QR ya NORMAL_QR_S3 par hoga.</p>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
                     <div>
                         <input type="file" id="power-sku-excel-file" accept=".xlsx,.xls,.csv" class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 border border-slate-200 rounded-xl p-1.5">
@@ -4967,7 +4967,10 @@ HTML_TEMPLATE = """
                 printerSelect.disabled = false;
             }
             const formats = requiresQr
-                ? [{value: 'NORMAL_QR', label: 'NORMAL_QR (Required)'}]
+                ? [
+                    {value: 'NORMAL_QR', label: 'NORMAL_QR'},
+                    {value: 'NORMAL_QR_S3', label: 'NORMAL_QR_S3'}
+                ]
                 : PRINT_FORMAT_OPTIONS[printerSelect.value || printerId];
             selectedPrintFormat = formats[0].value;
             document.getElementById('print-format-options').innerHTML = formats.map((format, index) => `
@@ -4992,7 +4995,10 @@ HTML_TEMPLATE = """
         async function queuePricePrint(printFormat) {
             const ticket=JSON.parse(decodeURIComponent(pendingPrintPayload));
             const requiresQr = ['POWER_SKU', 'KVI'].includes(ticket.article_type);
-            if (requiresQr) printFormat = 'NORMAL_QR';
+            const supportedSpecialFormats = ['NORMAL_QR', 'NORMAL_QR_S3'];
+            if (requiresQr && !supportedSpecialFormats.includes(printFormat)) {
+                printFormat = 'NORMAL_QR';
+            }
             pendingPrintPayload = null;
             document.getElementById('print-format-dialog').close();
 
@@ -5013,7 +5019,7 @@ HTML_TEMPLATE = """
             const status=document.getElementById('print-status');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
             const formatLabel = requiresQr
-                ? 'NORMAL_QR'
+                ? printFormat
                 : PRINT_FORMAT_OPTIONS[printerId].find(format => format.value === printFormat).label;
             status.textContent=`⏳ Sending ${copies} ${formatLabel} label${copies > 1 ? 's' : ''} to ${printerLabel}...`;
             try {
@@ -5673,7 +5679,7 @@ def create_print_job():
     }
     print_format = format_aliases.get(requested_format, requested_format)
     supported_formats = {
-        "THERMAL", "NORMAL_QR", "S3",
+        "THERMAL", "NORMAL_QR", "NORMAL_QR_S3", "S3",
         "DISCOUNT_A4", "NORMAL_A4_LANDSCAPE", "NORMAL_A4_PORTRAIT",
         "PROMOTION_A4", "PROMOTION_A4_S3",
     }
@@ -5689,7 +5695,8 @@ def create_print_job():
             "PROMOTION_A4", "PROMOTION_A4_S3",
         },
     }
-    if print_format not in printer_formats[printer_id] and print_format != "NORMAL_QR":
+    qr_formats = {"NORMAL_QR", "NORMAL_QR_S3"}
+    if print_format not in printer_formats[printer_id] and print_format not in qr_formats:
         return jsonify({"success":False,"error":"Print format is not supported by this printer"}),400
     with connect_db() as conn:
         requested_code = str(data["article_code"])
@@ -5706,10 +5713,10 @@ def create_print_job():
         article_type = product["article_type"] if product else "NORMAL"
         is_special_article = article_type in {"POWER_SKU", "KVI"}
         if is_special_article:
-            if print_format != "NORMAL_QR" or printer_id != "printer1":
+            if print_format not in qr_formats or printer_id != "printer1":
                 return jsonify({
                     "success":False,
-                    "error":"Power SKU and KVI articles can only be printed as NORMAL_QR on EPSON",
+                    "error":"Power SKU and KVI articles can only be printed as NORMAL_QR or NORMAL_QR_S3 on EPSON",
                 }),400
             price_columns = {
                 "cx": ("price_cx", "CX"),
@@ -5727,8 +5734,8 @@ def create_print_job():
             data["item_name"] = product["name"]
             data["price"] = selected_value
             data["unit"] = selected_price[1]
-        elif print_format == "NORMAL_QR":
-            return jsonify({"success":False,"error":"NORMAL_QR is reserved for Power SKU and KVI articles"}),400
+        elif print_format in qr_formats:
+            return jsonify({"success":False,"error":"QR formats are reserved for Power SKU and KVI articles"}),400
 
         cur=conn.execute("INSERT INTO print_jobs(article_code,item_name,price,unit,currency,copies,print_format,printer_id,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'pending',?) RETURNING id",(str(data['article_code']),str(data['item_name']),str(data['price']),str(data.get('unit','UN')),str(data.get('currency','KZ')),copies,print_format,printer_id,datetime.now().isoformat(timespec='seconds')))
         job_id=cur.fetchone()["id"]

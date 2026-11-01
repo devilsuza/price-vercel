@@ -80,8 +80,9 @@ The print dialog lets you choose **EPSON** (`printer1`) or **HP LaserJet**
 driver installed. The portal routes each queued job only to the matching
 bridge.
 
-EPSON offers `THERMAL`, `NORMAL_QR`, and `S3`. The included
-`epson_print_bridge.py` uses the selected job UOM for all three layouts, printing
+EPSON offers `THERMAL` and `S3` for regular articles. Power SKU and KVI articles
+can use `NORMAL_QR` or `NORMAL_QR_S3` (QR with the S3 layout). The included
+`epson_print_bridge.py` uses the selected job UOM for all formats, printing
 it as `KZ/<UOM>` (for example `KZ/CX`, `KZ/EMB`, or `KZ/UN`). Configure
 `print_bridge_config.json` beside the script by copying
 `print_bridge_config.example.json`, then set `portal_url`, `bridge_key`, and the
@@ -99,9 +100,9 @@ Uploading a replacement file removes prior membership in that same category
 while preserving the products and prices. The existing Master upload also
 accepts an optional article-category column containing `POWER SKU`, `KVI`, or
 `NORMAL`. Scanned products show their category; Power SKU/KVI show the four
-daily prices and can only be queued as `NORMAL_QR` to EPSON. The API enforces
-that special items print the selected current daily price and rejects other
-formats. Ordinary items continue to use Normal/S3.
+daily prices and can only be queued as `NORMAL_QR` or `NORMAL_QR_S3` to EPSON.
+The API enforces that special items print the selected current daily price and
+rejects other formats. Ordinary items continue to use Normal/S3.
 
 HP LaserJet offers `DISCOUNT_A4`,
 `NORMAL_A4_LANDSCAPE`, `NORMAL_A4_PORTRAIT`, `PROMOTION_A4`, and
