@@ -4316,7 +4316,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v13-special-article-browser';
+const CACHE_NAME = 'store-price-portal-v14-inline-special-print';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4930,7 +4930,7 @@ HTML_TEMPLATE = """
             }
         });
 
-        function renderPriceBox(label, subLabel, value, colorClass, item, priceType) {
+        function renderPriceBox(label, subLabel, value, colorClass, item, priceType, statusId = 'print-status') {
             const hasPrice = value && String(value).trim() !== "";
             const units = {cx:'CX', emb:'EMB', pc_kgm:'UN', bag:'BAG'};
             const articleType = item.article_type || 'NORMAL';
@@ -4942,7 +4942,7 @@ HTML_TEMPLATE = """
                 price_type:priceType,
                 article_type:articleType
             }));
-            return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}')"` : 'disabled'} class="w-full ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-4 text-center shadow-sm transition">
+            return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}', '${statusId}')"` : 'disabled'} class="w-full ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-4 text-center shadow-sm transition">
                 <span class="text-xs font-extrabold uppercase tracking-wider block text-slate-600">${label}</span>
                 <span class="text-[11px] text-slate-500 block mb-1">${subLabel} · ${units[priceType]||''}</span>
                 <span class="${hasPrice ? 'text-2xl sm:text-3xl font-black text-slate-900' : 'text-xl font-bold text-slate-400'} block mt-1">${hasPrice ? value : '--'}</span>
@@ -4951,6 +4951,7 @@ HTML_TEMPLATE = """
         }
 
         let pendingPrintPayload = null;
+        let pendingPrintStatusId = 'print-status';
         let selectedPrintFormat = null;
         const PRINT_FORMAT_OPTIONS = {
             printer1: [
@@ -4994,8 +4995,9 @@ HTML_TEMPLATE = """
             `).join('');
         }
 
-        function selectPricePrint(encoded) {
+        function selectPricePrint(encoded, statusId = 'print-status') {
             pendingPrintPayload = encoded;
+            pendingPrintStatusId = statusId;
             document.getElementById('print-target').disabled = false;
             renderPrintFormats();
             document.getElementById('print-format-dialog').showModal();
@@ -5029,7 +5031,9 @@ HTML_TEMPLATE = """
             const printerLabel = printerId === 'printer2' ? 'HP LaserJet' : 'EPSON';
             ticket.printer_id = requiresQr ? 'printer1' : printerId;
 
-            const status=document.getElementById('print-status');
+            const status=document.getElementById(pendingPrintStatusId) || document.getElementById('print-status');
+            pendingPrintStatusId = 'print-status';
+            status.classList.remove('hidden');
             status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-amber-50 text-amber-800 border border-amber-300';
             const formatLabel = requiresQr
                 ? printFormat
@@ -5041,6 +5045,10 @@ HTML_TEMPLATE = """
                 if(res.ok && data.success){
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-emerald-50 text-emerald-800 border border-emerald-300';
                     status.textContent=`✅ ${data.copies} ${formatLabel} label${data.copies > 1 ? 's' : ''} queued for ${printerLabel}. Print job #${data.job_id}.`;
+                    const details = document.getElementById(status.dataset.detailsId);
+                    details?.classList.add('hidden');
+                    const action = document.getElementById(status.dataset.actionId);
+                    if (action) action.textContent = 'View prices & print';
                 } else {
                     status.className='mt-3 p-3 rounded-xl text-sm font-bold bg-red-50 text-red-700 border border-red-300';
                     status.textContent='❌ '+(data.error||'Print job failed');
@@ -5051,9 +5059,9 @@ HTML_TEMPLATE = """
             }
         }
 
-        function displaySearchResults(items, query, sourceLabel) {
-            const resultBox = document.getElementById('price-result');
+        function displaySearchResults(items, query, sourceLabel, resultBox = document.getElementById('price-result')) {
             resultBox.classList.remove('hidden');
+            const statusId = resultBox.dataset.printStatusId || 'print-status';
 
             if (!items || items.length === 0) {
                 resultBox.innerHTML = `
@@ -5084,26 +5092,26 @@ HTML_TEMPLATE = """
                     </div>
 
                     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-                        ${renderPriceBox('Price', '1', item.price_cx, 'bg-emerald-50 border-emerald-400', item, 'cx')}
-                        ${renderPriceBox('Price', '2', item.price_emb, 'bg-blue-50 border-blue-400', item, 'emb')}
-                        ${renderPriceBox('Price', '3', item.price_pc_kgm, 'bg-amber-50 border-amber-400', item, 'pc_kgm')}
-                        ${renderPriceBox('Price', '4', item.price_bag, 'bg-purple-50 border-purple-400', item, 'bag')}
+                        ${renderPriceBox('Price', '1', item.price_cx, 'bg-emerald-50 border-emerald-400', item, 'cx', statusId)}
+                        ${renderPriceBox('Price', '2', item.price_emb, 'bg-blue-50 border-blue-400', item, 'emb', statusId)}
+                        ${renderPriceBox('Price', '3', item.price_pc_kgm, 'bg-amber-50 border-amber-400', item, 'pc_kgm', statusId)}
+                        ${renderPriceBox('Price', '4', item.price_bag, 'bg-purple-50 border-purple-400', item, 'bag', statusId)}
                     </div>
                 </div>
             `).join('');
         }
 
-        async function searchArticle(overrideQuery = null) {
+        async function searchArticle(overrideQuery = null, resultTarget = null) {
             const inputEl = document.getElementById('scan-input');
             const query = (overrideQuery !== null ? overrideQuery : inputEl.value).trim();
             if (!query) return;
 
-            const resultBox = document.getElementById('price-result');
+            const resultBox = resultTarget || document.getElementById('price-result');
             resultBox.classList.remove('hidden');
 
             if (!navigator.onLine) {
                 const localItems = await searchInLocalDB(query);
-                displaySearchResults(localItems, query, "⚡ Offline Local DB");
+                displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
                 inputEl.select();
                 return;
             }
@@ -5120,11 +5128,11 @@ HTML_TEMPLATE = """
                 clearTimeout(timeoutId);
 
                 const data = await res.json();
-                displaySearchResults(data.items || [], query, "🟢 Online Live DB");
+                displaySearchResults(data.items || [], query, "🟢 Online Live DB", resultBox);
                 inputEl.select();
             } catch (err) {
                 const localItems = await searchInLocalDB(query);
-                displaySearchResults(localItems, query, "⚡ Offline Local DB");
+                displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
                 inputEl.select();
             }
         }
@@ -5150,11 +5158,17 @@ HTML_TEMPLATE = """
 
             const entries = document.createElement('div');
             entries.className = 'mt-3 grid gap-2';
-            for (const item of items) {
+            for (const [index, item] of items.entries()) {
+                const rowId = `special-article-${index}`;
                 const button = document.createElement('button');
                 button.type = 'button';
                 button.className = 'flex w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm hover:border-indigo-400 hover:bg-indigo-50';
-                button.addEventListener('click', () => openSpecialArticle(item.barcode));
+                const actionId = `${rowId}-action`;
+                const panelId = `${rowId}-panel`;
+                const resultId = `${rowId}-prices`;
+                const statusId = `${rowId}-status`;
+                button.dataset.actionId = actionId;
+                button.addEventListener('click', () => openSpecialArticle(item.barcode, button, panel, result, status));
 
                 const details = document.createElement('span');
                 details.className = 'min-w-0';
@@ -5167,10 +5181,28 @@ HTML_TEMPLATE = """
                 details.append(name, code);
 
                 const action = document.createElement('span');
+                action.id = actionId;
                 action.className = 'shrink-0 rounded-lg bg-indigo-100 px-3 py-2 text-xs font-bold text-indigo-800';
                 action.textContent = 'View prices & print';
                 button.append(details, action);
-                entries.appendChild(button);
+
+                const panel = document.createElement('div');
+                panel.id = panelId;
+                panel.className = 'hidden mt-2 rounded-xl border border-indigo-200 bg-white p-3';
+                const result = document.createElement('div');
+                result.id = resultId;
+                result.dataset.printStatusId = statusId;
+                panel.appendChild(result);
+
+                const status = document.createElement('div');
+                status.id = statusId;
+                status.className = 'hidden';
+                status.dataset.detailsId = panelId;
+                status.dataset.actionId = actionId;
+
+                const articleRow = document.createElement('div');
+                articleRow.append(button, panel, status);
+                entries.appendChild(articleRow);
             }
             list.appendChild(entries);
         }
@@ -5216,11 +5248,19 @@ HTML_TEMPLATE = """
             }
         }
 
-        async function openSpecialArticle(articleCode) {
+        async function openSpecialArticle(articleCode, button, panel, result, status) {
             const input = document.getElementById('scan-input');
             input.value = articleCode;
-            await searchArticle(articleCode);
-            document.getElementById('price-result').scrollIntoView({behavior: 'smooth', block: 'start'});
+            if (!panel.classList.contains('hidden')) {
+                panel.classList.add('hidden');
+                document.getElementById(button.dataset.actionId).textContent = 'View prices & print';
+                return;
+            }
+            panel.classList.remove('hidden');
+            status.classList.add('hidden');
+            document.getElementById(button.dataset.actionId).textContent = 'Hide prices';
+            await searchArticle(articleCode, result);
+            panel.scrollIntoView({behavior: 'smooth', block: 'nearest'});
         }
 
         function toggleCamera() {
