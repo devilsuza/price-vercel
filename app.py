@@ -5310,6 +5310,29 @@ HTML_TEMPLATE = """
             return "";
         }
 
+        function guessArticleCodeColumn(columns) {
+            const normalize = value => value.toLowerCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^a-z0-9]+/g, ' ')
+                .trim();
+            const candidates = columns
+                .map(column => {
+                    const normalized = normalize(column);
+                    const tokens = normalized.split(' ');
+                    if (tokens.some(token => ['type', 'category', 'classification'].includes(token))) return null;
+                    const hasMasterCode = tokens.some(token => ['code', 'codigo', 'cod', 'sku'].includes(token));
+                    const hasBarcode = tokens.some(token => ['barcode', 'ean', 'gtin', 'upc'].includes(token));
+                    if (!hasMasterCode && !hasBarcode) return null;
+                    const score = (tokens.some(token => ['article', 'item', 'product', 'artigo'].includes(token)) ? 4 : 0)
+                        + (hasMasterCode ? 2 : 1);
+                    return {column, score};
+                })
+                .filter(Boolean)
+                .sort((left, right) => right.score - left.score);
+            return candidates[0]?.column || "";
+        }
+
         function renderTabMappings(tabs, mode) {
             const section = document.getElementById('mapping-section');
             const container = document.getElementById('tabs-container');
@@ -5318,8 +5341,7 @@ HTML_TEMPLATE = """
             section.classList.remove('hidden');
 
             container.innerHTML = tabs.map((tab) => {
-                const codeColumns = tab.columns.filter(column => !/(type|category|classification)/i.test(column));
-                const barcodeGuess = guessColumn(codeColumns, isMaster || isSpecialUpload ? ['article code', 'article', 'artigo', 'sku', 'item code', 'code', 'cod'] : ['ean', 'barcode', 'code', 'cod', 'sku', 'art', 'id']);
+                const barcodeGuess = guessArticleCodeColumn(tab.columns);
                 const eanGuess = guessColumn(tab.columns, ['ean', 'barcode', 'gtin', 'upc']);
                 const nameColumns = tab.columns.filter(column => !/(code|barcode|sku|type|category|classification)/i.test(column));
                 const nameGuess = guessColumn(nameColumns, ['name', 'desc', 'product', 'article', 'item', 'nome']);
@@ -5979,6 +6001,10 @@ def import_mapped():
                         if record["article_code"] in existing_codes
                     ]
                     skipped += len(records) - len(matched_records)
+                    if len(matched_records) != len(records):
+                        raise ValueError(
+                            f"{len(records) - len(matched_records)} {special_article_type.replace('_', ' ')} article(s) were not found in the master catalog; the previous category list was not changed."
+                        )
                     if not matched_records:
                         continue
 
@@ -6119,11 +6145,11 @@ def import_mapped():
                 for batch in chunks(alias_rows):
                     conn.executemany(alias_sql, batch)
 
-            conn.commit()
             if import_mode in ("power_sku", "kvi") and not special_upload_replaced:
                 raise ValueError(
                     f"No {special_article_type.replace('_', ' ')} articles matched the existing catalog; existing category list was not changed."
                 )
+            conn.commit()
             total_products = conn.execute(
                 "SELECT COUNT(*) AS total FROM products"
             ).fetchone()["total"]
