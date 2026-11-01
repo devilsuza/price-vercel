@@ -114,7 +114,8 @@ def init_db():
                 default = "NORMAL" if col == "article_type" else "UN" if col == "list_price_unit" else ""
                 conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT NOT NULL DEFAULT '{default}'")
         article_names = conn.execute(
-            "SELECT barcode, name FROM products WHERE name LIKE '%;%'"
+            "SELECT barcode, name FROM products WHERE name LIKE ?",
+            ("%;%",),
         ).fetchall()
         conn.executemany(
             "UPDATE products SET name=? WHERE barcode=?",
