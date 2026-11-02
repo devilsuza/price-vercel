@@ -66,9 +66,10 @@ successful import; the records imported from it are persistent in Supabase.
 ### System stock and manager password
 
 The Manager Panel accepts a daily `.xlsx`, `.xls`, or `.csv` system-stock file
-with `Article Code`, `Article Name`, and `Sys Qty` columns. Each successful
-upload replaces the previous system-stock snapshot without changing catalog
-articles or prices. **Physical stock only** search returns articles with a
+with `ITEM CODE`, `ITEM NAME`, and `CLOSING STOCK` columns (the stock column
+also accepts the previous `Sys Qty` header). Each successful upload replaces
+the previous system-stock snapshot without changing catalog articles or
+prices. **Physical stock only** search returns articles with a
 system quantity greater than zero; with the checkbox off, search includes the
 full catalog and stock-uploaded articles. The uploaded stock quantity is also
 available when the offline catalog has synced.

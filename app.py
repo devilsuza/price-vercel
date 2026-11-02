@@ -4766,7 +4766,7 @@ HTML_TEMPLATE = """
             </div>
             <div class="bg-white p-6 rounded-2xl shadow-md border-2 border-emerald-200">
                 <h2 class="text-xl font-bold text-slate-800">1D. System Stock Update</h2>
-                <p class="mt-1 text-sm text-slate-500">Daily Excel/CSV upload karein. Columns: Article Code, Article Name, Sys Qty. Naya upload purana system stock replace karega.</p>
+                <p class="mt-1 text-sm text-slate-500">Daily Excel/CSV upload karein. Image wale headers use karein: ITEM CODE, ITEM NAME, CLOSING STOCK. Naya upload purana system stock replace karega.</p>
                 <input type="file" id="system-stock-file" accept=".xlsx,.xls,.csv"
                     class="mt-4 block w-full rounded-xl border border-slate-200 p-1.5 text-sm text-slate-600 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-50 file:px-4 file:py-2.5 file:font-semibold file:text-emerald-800">
                 <button onclick="uploadSystemStock()" class="mt-3 w-full rounded-xl bg-emerald-600 px-6 py-2.5 font-semibold text-white shadow hover:bg-emerald-700">📦 Upload System Stock</button>
@@ -6419,13 +6419,14 @@ def upload_system_stock():
     code_column = find_column({"articlecode", "itemcode", "code", "sku", "barcode"})
     name_column = find_column({"articlename", "itemname", "name", "description", "itemdescription"})
     quantity_column = find_column({
+        "closingstock", "closingqty", "closingquantity",
         "sysqty", "systemqty", "systemquantity", "systemstockqty", "systemstock",
         "sysquantity", "quantity", "qty",
     })
     if not code_column or not name_column or not quantity_column:
         return jsonify({
             "success": False,
-            "error": "Required columns not found. Use Article Code, Article Name, and Sys Qty.",
+            "error": "Required columns not found. Use ITEM CODE, ITEM NAME, and CLOSING STOCK.",
         }), 400
 
     records_by_code = {}
@@ -6452,7 +6453,7 @@ def upload_system_stock():
     if invalid_rows:
         return jsonify({
             "success": False,
-            "error": f"Invalid or missing Sys Qty on row(s): {', '.join(map(str, invalid_rows[:10]))}. No stock data was changed.",
+            "error": f"Invalid or missing CLOSING STOCK on row(s): {', '.join(map(str, invalid_rows[:10]))}. No stock data was changed.",
         }), 400
     if not records_by_code:
         return jsonify({"success": False, "error": "The file contains no stock rows."}), 400
