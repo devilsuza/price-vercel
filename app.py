@@ -3,6 +3,8 @@ import uuid
 import sqlite3
 import csv
 import re
+import hmac
+import math
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string, Response
 import pandas as pd
@@ -16,6 +18,10 @@ UPLOAD_FOLDER = os.path.join(RUNTIME_DIR, "store_price_uploads")
 DB_NAME = os.path.join(RUNTIME_DIR, "store_prices.db")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
+EMPLOYEE_PASSWORD = os.getenv("EMPLOYEE_PASSWORD", "123").strip()
+MANAGER_PASSWORD = os.getenv("MANAGER_PASSWORD", "2026").strip()
+if not EMPLOYEE_PASSWORD or not MANAGER_PASSWORD:
+    raise RuntimeError("EMPLOYEE_PASSWORD and MANAGER_PASSWORD must not be empty.")
 if IS_VERCEL and not USE_POSTGRES:
     raise RuntimeError(
         "DATABASE_URL must be configured on Vercel. "
@@ -163,6 +169,23 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ean_article ON ean_aliases(article_code)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_stock (
+                article_code TEXT PRIMARY KEY,
+                article_name TEXT NOT NULL,
+                sys_qty NUMERIC NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_system_stock_qty ON system_stock(sys_qty)")
+        stock_sync_schema = conn.execute(
+            "SELECT value FROM catalog_meta WHERE key='stock_sync_schema'"
+        ).fetchone()
+        if not stock_sync_schema:
+            conn.execute(
+                "INSERT INTO catalog_meta(key,value) VALUES('stock_sync_schema','1')"
+            )
+            bump_catalog_revision(conn)
         # Existing article codes must also work as searchable aliases.
         conn.execute("""
             INSERT INTO ean_aliases(ean_code, article_code, created_at)
@@ -4368,11 +4391,10 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v20-incremental-sync';
+const CACHE_NAME = 'store-price-portal-v21-incremental-sync';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
-    'https://unpkg.com/html5-qrcode',
     'https://cdn-icons-png.flaticon.com/512/3081/3081559.png'
 ];
 
@@ -4423,92 +4445,61 @@ HTML_TEMPLATE = """
     <title>Store Price Checker & Manager Portal</title>
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#4338ca">
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.tailwindcss.com"></script>
     <style>
         body.portal-body {
-            background:
-                radial-gradient(ellipse at 10% 0%, rgba(199, 210, 254, .55), transparent 36rem),
-                linear-gradient(160deg, #f8fafc 0%, #eef2ff 52%, #f8fafc 100%);
+            background: #f1f5f9;
         }
         nav.portal-nav {
-            background: linear-gradient(115deg, #111827 0%, #312e81 58%, #4338ca 100%);
-            box-shadow: 0 12px 30px rgba(30, 41, 59, .2);
+            background: #312e81;
+            box-shadow: 0 4px 12px rgba(30, 41, 59, .12);
         }
         .portal-shell { max-width: 76rem; padding-top: 1.25rem; padding-bottom: 3rem; }
         .portal-card {
             border-radius: 1.25rem;
-            box-shadow: 0 12px 32px rgba(30, 41, 59, .08);
-            transition: box-shadow .22s ease, transform .22s ease;
-            animation: portal-enter .38s ease both;
+            box-shadow: 0 4px 14px rgba(30, 41, 59, .06);
         }
         #view-manager > div > .bg-white {
             border-radius: 1.25rem;
-            box-shadow: 0 12px 32px rgba(30, 41, 59, .08);
-            animation: portal-enter .38s ease both;
+            box-shadow: 0 4px 14px rgba(30, 41, 59, .06);
         }
-        @media (hover: hover) {
-            .portal-card:hover { box-shadow: 0 18px 38px rgba(30, 41, 59, .12); }
-        }
-        #login-overlay > .login-card { animation: login-card-enter .72s cubic-bezier(.2, .8, .2, 1) both; }
         #login-overlay {
-            isolation: isolate;
-            overflow: hidden;
-            background:
-                radial-gradient(ellipse at 18% 20%, rgba(99, 102, 241, .36), transparent 34rem),
-                radial-gradient(ellipse at 86% 82%, rgba(14, 165, 233, .23), transparent 30rem),
-                rgba(15, 23, 42, .88);
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            background: rgba(15, 23, 42, .82);
         }
-        #login-overlay::before, #login-overlay::after {
-            position: absolute;
-            z-index: -1;
-            width: 18rem;
-            height: 18rem;
-            border: 1px solid rgba(255, 255, 255, .12);
-            border-radius: 9999px;
-            content: "";
-            pointer-events: none;
-            animation: login-orbit 18s ease-in-out infinite alternate;
-        }
-        #login-overlay::before { top: -8rem; left: -5rem; }
-        #login-overlay::after {
-            right: -7rem;
-            bottom: -10rem;
-            width: 25rem;
-            height: 25rem;
-            animation-delay: -7s;
-        }
+        #login-overlay.hidden { display: none; }
         .login-card {
             position: relative;
-            overflow: hidden;
             width: 100%;
             max-width: 26rem;
-            padding: clamp(1.75rem, 6vw, 2.5rem);
-            border: 1px solid rgba(255, 255, 255, .7);
-            border-radius: 1.75rem;
-            background: linear-gradient(145deg, rgba(255, 255, 255, .99), rgba(238, 242, 255, .97));
-            box-shadow: 0 32px 90px rgba(2, 6, 23, .42), 0 0 0 1px rgba(255, 255, 255, .12);
+            padding: 2rem;
+            border-radius: 1rem;
+            background: #fff;
+            box-shadow: 0 16px 40px rgba(2, 6, 23, .24);
             text-align: center;
         }
         .login-card::before {
             position: absolute;
             inset: 0 0 auto;
-            height: 4px;
-            background: linear-gradient(90deg, #38bdf8, #6366f1, #a78bfa);
+            height: 3px;
+            background: #4f46e5;
             content: "";
         }
         .login-brand-icon {
-            position: relative;
             display: grid;
-            width: 4.25rem;
-            height: 4.25rem;
-            margin: 0 auto 1.25rem;
+            width: 3.5rem;
+            height: 3.5rem;
+            margin: 0 auto 1rem;
             place-items: center;
-            border: 1px solid rgba(165, 180, 252, .65);
-            border-radius: 1.35rem;
-            background: linear-gradient(145deg, #eef2ff, #e0e7ff);
+            border-radius: 1rem;
+            background: #eef2ff;
             color: #4338ca;
-            box-shadow: 0 10px 24px rgba(79, 70, 229, .14);
-            animation: login-icon-float 4s ease-in-out infinite;
         }
         .login-kicker {
             color: #4f46e5;
@@ -4527,13 +4518,13 @@ HTML_TEMPLATE = """
             font-weight: 600;
             text-align: center;
             outline: none;
-            transition: border-color .2s ease, box-shadow .2s ease, background .2s ease;
+            transition: border-color .15s ease;
         }
         .login-input::placeholder { color: #94a3b8; font-weight: 500; }
         .login-input:focus {
             border-color: #6366f1;
             background: #fff;
-            box-shadow: 0 0 0 4px rgba(99, 102, 241, .13), 0 8px 20px rgba(79, 70, 229, .08);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, .12);
         }
         .login-submit {
             position: relative;
@@ -4545,64 +4536,22 @@ HTML_TEMPLATE = """
             overflow: hidden;
             border: 0;
             border-radius: 1rem;
-            background: linear-gradient(110deg, #4338ca, #4f46e5 55%, #6366f1);
+            background: #4f46e5;
             padding: .95rem 1.25rem;
             color: #fff;
             font-weight: 800;
-            box-shadow: 0 10px 22px rgba(67, 56, 202, .27);
-            transition: transform .2s ease, box-shadow .2s ease, filter .2s ease;
+            transition: background .15s ease;
         }
         .login-submit:hover {
-            transform: translateY(-2px);
-            filter: brightness(1.06);
-            box-shadow: 0 14px 28px rgba(67, 56, 202, .34);
+            background: #4338ca;
         }
         .login-submit:focus-visible { outline: 3px solid #a5b4fc; outline-offset: 3px; }
-        #login-error:not(.hidden) { animation: login-error-in .28s ease both; }
-        @keyframes login-card-enter {
-            from { opacity: 0; transform: translateY(24px) scale(.96); }
-            to { opacity: 1; transform: translateY(0) scale(1); }
-        }
-        @keyframes login-orbit {
-            from { transform: translate3d(-1rem, 0, 0) scale(.94); }
-            to { transform: translate3d(2rem, 1.5rem, 0) scale(1.08); }
-        }
-        @keyframes login-icon-float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-5px); }
-        }
-        @keyframes login-error-in {
-            from { opacity: 0; transform: translateY(-4px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        #price-result:not(.hidden), #special-article-list:not(.hidden) {
-            animation: portal-enter .24s ease both;
-        }
-        button { transition: transform .16s ease, box-shadow .16s ease, filter .16s ease; }
-        button:active { transform: translateY(1px) scale(.99); }
-        input:focus-visible { box-shadow: 0 0 0 4px rgba(99, 102, 241, .14); }
-        @keyframes portal-enter {
-            from { opacity: 0; transform: translateY(8px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes portal-modal {
-            from { opacity: 0; transform: translateY(10px) scale(.98); }
-            to { opacity: 1; transform: translateY(0) scale(1); }
-        }
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after {
-                animation-duration: .01ms !important;
-                animation-iteration-count: 1 !important;
-                scroll-behavior: auto !important;
-                transition-duration: .01ms !important;
-            }
-        }
     </style>
 </head>
 <body class="portal-body bg-slate-100 min-h-screen font-sans text-slate-800">
 
     <!-- ================= LOGIN MODAL OVERLAY ================= -->
-    <div id="login-overlay" class="fixed inset-0 backdrop-blur-md z-50 flex items-center justify-center p-4">
+    <div id="login-overlay" class="fixed inset-0 z-50 flex items-center justify-center p-4">
         <div class="login-card">
             <div class="login-brand-icon" aria-hidden="true">
                 <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -4703,6 +4652,11 @@ HTML_TEMPLATE = """
                     </button>
                 </div>
 
+                <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-700">
+                    <input type="checkbox" id="physical-stock-only" class="h-4 w-4 rounded border-slate-300 text-indigo-600">
+                    Physical stock only (System Qty &gt; 0)
+                </label>
+
                 <div id="price-result" class="hidden mt-4 space-y-4"></div>
                 <div id="print-status" class="hidden mt-3"></div>
 
@@ -4748,6 +4702,22 @@ HTML_TEMPLATE = """
             </div>
         </dialog>
 
+        <dialog id="manager-action-dialog" class="w-full max-w-sm rounded-2xl p-0 shadow-2xl backdrop:bg-slate-900/60">
+            <form method="dialog" class="p-5" onsubmit="return false">
+                <h2 id="manager-action-title" class="text-lg font-extrabold text-slate-800">Manager password required</h2>
+                <p id="manager-action-description" class="mt-2 text-sm text-slate-600"></p>
+                <label for="manager-action-password" class="mt-4 block text-sm font-semibold text-slate-700">Manager password</label>
+                <input id="manager-action-password" type="password" autocomplete="current-password"
+                    onkeydown="if(event.key==='Enter'){event.preventDefault();submitManagerAction();}"
+                    class="mt-1 w-full rounded-lg border border-slate-300 p-3" required>
+                <p id="manager-action-error" role="alert" class="mt-2 hidden text-sm font-semibold text-red-600"></p>
+                <div class="mt-4 grid grid-cols-2 gap-3">
+                    <button type="button" onclick="closeManagerAction()" class="rounded-xl border border-slate-300 p-3 font-semibold text-slate-700">Cancel</button>
+                    <button type="button" id="manager-action-submit" onclick="submitManagerAction()" class="rounded-xl bg-red-600 p-3 font-bold text-white">Confirm delete</button>
+                </div>
+            </form>
+        </dialog>
+
         <!-- ================= MANAGER UPLOAD & EDIT VIEW ================= -->
         <div id="view-manager" class="hidden space-y-6">
             
@@ -4762,6 +4732,7 @@ HTML_TEMPLATE = """
                         class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 border border-slate-200 rounded-xl p-1.5">
                     <button onclick="uploadForPreview('master')" class="mt-3 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-6 py-2.5 rounded-xl shadow">📚 Read Master Sheet</button>
                     <div id="master-upload-status" class="mt-3 text-sm font-medium hidden"></div>
+                    <button onclick="requestDataDelete('master')" class="mt-3 w-full rounded-xl border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50">Delete uploaded catalog data</button>
                 </div>
                 <div class="bg-white p-6 rounded-2xl shadow-md border-2 border-amber-200">
                     <div class="mb-4">
@@ -4772,6 +4743,7 @@ HTML_TEMPLATE = """
                         class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-amber-50 file:text-amber-800 border border-slate-200 rounded-xl p-1.5">
                     <button onclick="uploadForPreview('price')" class="mt-3 w-full bg-amber-500 hover:bg-amber-600 text-white font-semibold px-6 py-2.5 rounded-xl shadow">💰 Read Daily Price File</button>
                     <div id="price-upload-status" class="mt-3 text-sm font-medium hidden"></div>
+                    <button onclick="requestDataDelete('price')" class="mt-3 w-full rounded-xl border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50">Delete all daily prices</button>
                 </div>
             </div>
             <div class="bg-white p-6 rounded-2xl shadow-md border-2 border-violet-200">
@@ -4782,13 +4754,24 @@ HTML_TEMPLATE = """
                         <input type="file" id="power-sku-excel-file" accept=".xlsx,.xls,.csv" class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 border border-slate-200 rounded-xl p-1.5">
                         <button onclick="uploadForPreview('power_sku')" class="mt-2 w-full bg-violet-600 hover:bg-violet-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow">⚡ Read Power SKU File</button>
                         <div id="power-sku-upload-status" class="mt-2 text-sm font-medium hidden"></div>
+                        <button onclick="requestDataDelete('power_sku')" class="mt-2 w-full rounded-xl border border-red-300 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50">Delete Power SKU data</button>
                     </div>
                     <div>
                         <input type="file" id="kvi-excel-file" accept=".xlsx,.xls,.csv" class="block w-full text-sm text-slate-600 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-rose-50 file:text-rose-700 border border-slate-200 rounded-xl p-1.5">
                         <button onclick="uploadForPreview('kvi')" class="mt-2 w-full bg-rose-600 hover:bg-rose-700 text-white font-semibold px-4 py-2.5 rounded-xl shadow">⭐ Read KVI File</button>
                         <div id="kvi-upload-status" class="mt-2 text-sm font-medium hidden"></div>
+                        <button onclick="requestDataDelete('kvi')" class="mt-2 w-full rounded-xl border border-red-300 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50">Delete KVI data</button>
                     </div>
                 </div>
+            </div>
+            <div class="bg-white p-6 rounded-2xl shadow-md border-2 border-emerald-200">
+                <h2 class="text-xl font-bold text-slate-800">1D. System Stock Update</h2>
+                <p class="mt-1 text-sm text-slate-500">Daily Excel/CSV upload karein. Columns: Article Code, Article Name, Sys Qty. Naya upload purana system stock replace karega.</p>
+                <input type="file" id="system-stock-file" accept=".xlsx,.xls,.csv"
+                    class="mt-4 block w-full rounded-xl border border-slate-200 p-1.5 text-sm text-slate-600 file:mr-4 file:rounded-xl file:border-0 file:bg-emerald-50 file:px-4 file:py-2.5 file:font-semibold file:text-emerald-800">
+                <button onclick="uploadSystemStock()" class="mt-3 w-full rounded-xl bg-emerald-600 px-6 py-2.5 font-semibold text-white shadow hover:bg-emerald-700">📦 Upload System Stock</button>
+                <div id="system-stock-status" role="status" class="mt-3 hidden text-sm font-medium"></div>
+                <button onclick="requestDataDelete('stock')" class="mt-3 w-full rounded-xl border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50">Delete all system stock data</button>
             </div>
             <div class="flex justify-end"><span class="bg-indigo-50 text-indigo-700 text-xs font-bold px-3 py-1.5 rounded-full border border-indigo-200" id="total-count-badge">Total Articles in DB: {{ total_products }}</span></div>
             <!-- Step 2: Dynamic Tab & Column Mapping -->
@@ -4853,15 +4836,17 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const EMPLOYEE_PASS = "123";
-        const MANAGER_PASS = "2026";
+        const EMPLOYEE_PASS = {{ employee_password|tojson }};
         let currentRole = null;
+        let pendingManagerAction = null;
 
         let currentTempFile = null;
         let currentUploadMode = "master";
         let html5QrCode = null;
         let cameraActive = false;
         let allManagerProducts = [];
+        const MANAGER_PAGE_SIZE = 100;
+        let managerSearchTimer = null;
         let qrLibraryPromise = null;
 
         // PWA Install Prompt
@@ -5021,7 +5006,7 @@ HTML_TEMPLATE = """
             }
         }
 
-        async function searchInLocalDB(query) {
+        async function searchInLocalDB(query, physicalStockOnly = false) {
             const db = await openLocalDB();
             const cleanQ = query.trim();
             const lowerQ = cleanQ.toLowerCase();
@@ -5032,8 +5017,11 @@ HTML_TEMPLATE = """
 
                 const exactReq = store.get(cleanQ);
                 exactReq.onsuccess = () => {
-                    if (exactReq.result) {
-                        resolve([exactReq.result]);
+                    if (exactReq.result && (!physicalStockOnly || Number(exactReq.result.sys_qty) > 0)) {
+                        const item = exactReq.result;
+                        resolve([physicalStockOnly && item.stock_name
+                            ? {...item, name: item.stock_name}
+                            : item]);
                     } else {
                         const matches = [];
                         const cursorReq = store.openCursor();
@@ -5042,9 +5030,14 @@ HTML_TEMPLATE = """
                             if (cursor && matches.length < 15) {
                                 const item = cursor.value;
                                 const bMatch = item.barcode && item.barcode.toLowerCase().includes(lowerQ);
-                                const nMatch = item.name && displayArticleName(item.name).toLowerCase().includes(lowerQ);
-                                if (bMatch || nMatch) {
-                                    matches.push(item);
+                                const nMatch = (item.name && displayArticleName(item.name).toLowerCase().includes(lowerQ))
+                                    || (physicalStockOnly && item.stock_name
+                                        && displayArticleName(item.stock_name).toLowerCase().includes(lowerQ));
+                                const inStock = !physicalStockOnly || Number(item.sys_qty) > 0;
+                                if (inStock && (bMatch || nMatch)) {
+                                    matches.push(physicalStockOnly && item.stock_name
+                                        ? {...item, name: item.stock_name}
+                                        : item);
                                 }
                                 cursor.continue();
                             } else {
@@ -5087,6 +5080,14 @@ HTML_TEMPLATE = """
                 text.innerText = `Offline Mode (${savedCount} items)`;
                 banner.classList.remove('hidden');
                 if (offlineCountLbl) offlineCountLbl.innerText = `${savedCount} Articles Ready`;
+            }
+        }
+
+        function scheduleCatalogSync() {
+            if (window.requestIdleCallback) {
+                window.requestIdleCallback(() => syncDatabaseInBackground(false), {timeout: 3000});
+            } else {
+                setTimeout(() => syncDatabaseInBackground(false), 1000);
             }
         }
 
@@ -5145,7 +5146,6 @@ HTML_TEMPLATE = """
             updateNetworkUI();
             updatePendingPrintBadge();
             flushPendingPrintJobs();
-            syncDatabaseInBackground(false);
             setInterval(() => {
                 if (navigator.onLine) {
                     flushPendingPrintJobs();
@@ -5179,28 +5179,55 @@ HTML_TEMPLATE = """
             if (e.key === 'Enter') handleLogin();
         });
 
-        function handleLogin() {
+        async function handleLogin() {
             const pinInput = document.getElementById('login-pin');
             const errEl = document.getElementById('login-error');
             const pin = pinInput.value.trim();
+            let errorMessage = '❌ Wrong Password! Try again.';
 
-            if (pin === EMPLOYEE_PASS) {
-                currentRole = "employee";
-                errEl.classList.add('hidden');
-                document.getElementById('login-overlay').classList.add('hidden');
-                updateRoleBadge("👤 Employee");
-                switchMode('scanner');
-            } else if (pin === MANAGER_PASS) {
-                currentRole = "manager";
-                errEl.classList.add('hidden');
-                document.getElementById('login-overlay').classList.add('hidden');
-                updateRoleBadge("👔 Manager");
-                switchMode('manager');
-            } else {
-                errEl.classList.remove('hidden');
-                pinInput.value = "";
-                pinInput.focus();
+            try {
+                let role = null;
+                if (!navigator.onLine && pin === EMPLOYEE_PASS) {
+                    role = 'employee';
+                } else if (navigator.onLine) {
+                    const response = await fetch('/api/auth', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({password: pin})
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        role = data.role;
+                    } else if (response.status !== 401) {
+                        errorMessage = `❌ Login service unavailable (${response.status}). Try again.`;
+                    }
+                }
+                if (role === 'employee' || role === 'manager') {
+                    currentRole = role;
+                    errEl.classList.add('hidden');
+                    pinInput.value = '';
+                    document.getElementById('login-overlay').classList.add('hidden');
+                    updateRoleBadge(role === 'manager' ? "👔 Manager" : "👤 Employee");
+                    switchMode(role === 'manager' ? 'manager' : 'scanner');
+                    scheduleCatalogSync();
+                    return;
+                }
+            } catch (error) {
+                if (!navigator.onLine && pin === EMPLOYEE_PASS) {
+                    currentRole = 'employee';
+                    errEl.classList.add('hidden');
+                    document.getElementById('login-overlay').classList.add('hidden');
+                    updateRoleBadge("👤 Employee");
+                    switchMode('scanner');
+                    return;
+                } else {
+                    errorMessage = '❌ Login service unavailable. Check your connection and try again.';
+                }
             }
+            errEl.textContent = errorMessage;
+            errEl.classList.remove('hidden');
+            pinInput.value = "";
+            pinInput.focus();
         }
 
         function updateRoleBadge(text) {
@@ -5220,14 +5247,8 @@ HTML_TEMPLATE = """
 
         function switchMode(mode) {
             if (mode === 'manager' && currentRole !== 'manager') {
-                const askPin = prompt("🔒 Enter Manager Password to access Manager Panel:");
-                if (askPin === MANAGER_PASS) {
-                    currentRole = 'manager';
-                    updateRoleBadge("👔 Manager");
-                } else {
-                    if (askPin !== null) alert("❌ Invalid Manager Password!");
-                    return;
-                }
+                openManagerAction('manager_access');
+                return;
             }
 
             const scannerView = document.getElementById('view-scanner');
@@ -5247,7 +5268,106 @@ HTML_TEMPLATE = """
                 btnManager.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium bg-white text-indigo-700 shadow";
                 btnScanner.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
                 stopCamera();
-                loadManagerProductTable(); // Load table when entering manager mode
+                loadManagerProductTable();
+            }
+        }
+
+        const deleteActions = {
+            master: {
+                title: 'Delete uploaded catalog data?',
+                description: 'This resets articles, daily prices and categories to the built-in master catalog. System stock remains unchanged.'
+            },
+            price: {
+                title: 'Delete all daily prices?',
+                description: 'This clears all saved article price values. The article catalog and system stock remain unchanged.'
+            },
+            power_sku: {
+                title: 'Delete Power SKU data?',
+                description: 'This removes the Power SKU category from all articles. Prices and article details remain unchanged.'
+            },
+            kvi: {
+                title: 'Delete KVI data?',
+                description: 'This removes the KVI category from all articles. Prices and article details remain unchanged.'
+            },
+            stock: {
+                title: 'Delete all system stock data?',
+                description: 'This clears the uploaded stock quantities used by Physical stock only search.'
+            }
+        };
+
+        function openManagerAction(action) {
+            pendingManagerAction = action;
+            const dialog = document.getElementById('manager-action-dialog');
+            const isAccess = action === 'manager_access';
+            document.getElementById('manager-action-title').textContent =
+                isAccess ? 'Manager password required' : deleteActions[action].title;
+            document.getElementById('manager-action-description').textContent =
+                isAccess ? 'Enter the manager password to open the manager panel.' : deleteActions[action].description;
+            document.getElementById('manager-action-submit').textContent = isAccess ? 'Continue' : 'Confirm delete';
+            document.getElementById('manager-action-password').value = '';
+            document.getElementById('manager-action-error').classList.add('hidden');
+            dialog.showModal();
+            document.getElementById('manager-action-password').focus();
+        }
+
+        function requestDataDelete(action) {
+            if (currentRole !== 'manager') {
+                alert('Manager access is required.');
+                return;
+            }
+            if (!confirm(`${deleteActions[action].title}\n\n${deleteActions[action].description}`)) return;
+            openManagerAction(action);
+        }
+
+        function closeManagerAction() {
+            document.getElementById('manager-action-dialog').close();
+            document.getElementById('manager-action-password').value = '';
+            pendingManagerAction = null;
+        }
+
+        async function submitManagerAction() {
+            const passwordInput = document.getElementById('manager-action-password');
+            const errorEl = document.getElementById('manager-action-error');
+            const submitButton = document.getElementById('manager-action-submit');
+            const password = passwordInput.value;
+            if (!password || !pendingManagerAction) return;
+            submitButton.disabled = true;
+            errorEl.classList.add('hidden');
+            try {
+                if (pendingManagerAction === 'manager_access') {
+                    const response = await fetch('/api/auth', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({password})
+                    });
+                    if (!response.ok) throw new Error('Incorrect manager password or connection unavailable.');
+                    const data = await response.json();
+                    if (data.role !== 'manager') throw new Error('Incorrect manager password.');
+                    currentRole = 'manager';
+                    updateRoleBadge('👔 Manager');
+                    closeManagerAction();
+                    switchMode('manager');
+                    return;
+                }
+                const response = await fetch('/api/data-delete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password, scope: pendingManagerAction})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Unable to delete data.');
+                }
+                closeManagerAction();
+                await syncDatabaseInBackground(false);
+                await loadManagerProductTable();
+                alert(data.message);
+            } catch (error) {
+                errorEl.textContent = error.message || 'Request failed. Please try again.';
+                errorEl.classList.remove('hidden');
+                passwordInput.select();
+            } finally {
+                submitButton.disabled = false;
             }
         }
 
@@ -5274,8 +5394,19 @@ HTML_TEMPLATE = """
             return String(name || '').replace(/;/g, ' ').replace(/\\s+/g, ' ').trim();
         }
 
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            })[character]);
+        }
+
         function renderPriceBox(label, subLabel, value, colorClass, item, priceType, statusId = 'print-status') {
             const hasPrice = value && String(value).trim() !== "";
+            const safeValue = escapeHtml(hasPrice ? value : '--');
             const units = {cx:'CX', emb:'EMB', pc_kgm:'UN', bag:'BAG'};
             const articleType = item.article_type || 'NORMAL';
             const payload = encodeURIComponent(JSON.stringify({
@@ -5289,7 +5420,7 @@ HTML_TEMPLATE = """
             return `<button ${hasPrice ? `onclick="selectPricePrint('${payload}', '${statusId}')"` : 'disabled'} class="w-full min-w-0 ${hasPrice ? colorClass+' hover:scale-[1.02] cursor-pointer' : 'bg-slate-50 border-slate-200 opacity-60'} border-2 rounded-2xl p-3 text-center shadow-sm transition sm:p-4">
                 <span class="text-xs font-extrabold uppercase tracking-wider block text-slate-600">${label}</span>
                 <span class="text-[11px] text-slate-500 block mb-1">${subLabel} · ${units[priceType]||''}</span>
-                <span class="${hasPrice ? 'text-2xl sm:text-3xl font-black text-slate-900' : 'text-xl font-bold text-slate-400'} block mt-1 break-words">${hasPrice ? value : '--'}</span>
+                <span class="${hasPrice ? 'text-2xl sm:text-3xl font-black text-slate-900' : 'text-xl font-bold text-slate-400'} block mt-1 break-words">${safeValue}</span>
                 ${hasPrice ? '<span class="block mt-2 text-sm font-black text-indigo-700">🖨️ PRINT THIS PRICE</span>' : ''}
             </button>`;
         }
@@ -5463,7 +5594,7 @@ HTML_TEMPLATE = """
                 resultBox.innerHTML = `
                     <div class="bg-red-50 border-2 border-red-300 p-6 rounded-2xl text-center">
                         <p class="text-2xl font-bold text-red-600">❌ Article Not Found</p>
-                        <p class="text-slate-600 mt-1">No record found for: <strong>${query}</strong> (${sourceLabel})</p>
+                        <p class="text-slate-600 mt-1">No record found for: <strong>${escapeHtml(query)}</strong> (${sourceLabel})</p>
                     </div>`;
                 return;
             }
@@ -5474,7 +5605,7 @@ HTML_TEMPLATE = """
                         <div class="min-w-0 w-full">
                             <div class="flex flex-wrap items-center gap-2">
                                 <span class="max-w-full break-all rounded-lg bg-indigo-100 px-3 py-1 text-xs font-extrabold uppercase tracking-wider text-indigo-800">
-                                    Article Code: ${item.article_code || item.barcode}
+                                    Article Code: ${escapeHtml(item.article_code || item.barcode)}
                                 </span>
                                 <span class="max-w-full break-words rounded-lg px-3 py-1 text-xs font-extrabold uppercase tracking-wider ${item.article_type === 'KVI' ? 'bg-rose-100 text-rose-800' : item.article_type === 'POWER_SKU' ? 'bg-violet-100 text-violet-800' : 'bg-slate-100 text-slate-700'}">
                                     ${item.article_type === 'POWER_SKU' ? 'POWER SKU' : item.article_type || 'NORMAL'}
@@ -5483,7 +5614,8 @@ HTML_TEMPLATE = """
                                     ${sourceLabel}
                                 </span>
                             </div>
-                            <h3 class="mt-2 break-words text-xl font-black text-slate-900 sm:text-3xl">${displayArticleName(item.name)}</h3>
+                            <h3 class="mt-2 break-words text-xl font-black text-slate-900 sm:text-3xl">${escapeHtml(displayArticleName(item.name))}</h3>
+                            ${item.sys_qty !== null && item.sys_qty !== undefined ? `<p class="mt-2 text-sm font-bold text-emerald-700">System Qty: ${item.sys_qty}</p>` : ''}
                         </div>
                     </div>
 
@@ -5502,11 +5634,12 @@ HTML_TEMPLATE = """
             const query = (overrideQuery !== null ? overrideQuery : inputEl.value).trim();
             if (!query) return;
 
+            const physicalStockOnly = document.getElementById('physical-stock-only').checked;
             const resultBox = resultTarget || document.getElementById('price-result');
             resultBox.classList.remove('hidden');
 
             if (!navigator.onLine) {
-                const localItems = await searchInLocalDB(query);
+                const localItems = await searchInLocalDB(query, physicalStockOnly);
                 displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
                 if (!resultTarget) inputEl.select();
                 return;
@@ -5518,7 +5651,7 @@ HTML_TEMPLATE = """
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 2500);
 
-                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`, {
+                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&physical_stock=${physicalStockOnly ? '1' : '0'}`, {
                     signal: controller.signal
                 });
                 clearTimeout(timeoutId);
@@ -5527,7 +5660,7 @@ HTML_TEMPLATE = """
                 displaySearchResults(data.items || [], query, "🟢 Online Live DB", resultBox);
                 if (!resultTarget) inputEl.select();
             } catch (err) {
-                const localItems = await searchInLocalDB(query);
+                const localItems = await searchInLocalDB(query, physicalStockOnly);
                 displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
                 if (!resultTarget) inputEl.select();
             }
@@ -5739,15 +5872,27 @@ HTML_TEMPLATE = """
         // =========================================================================
         // MANAGER EDITABLE PRODUCT TABLE LOGIC
         // =========================================================================
-        async function loadManagerProductTable() {
+        async function loadManagerProductTable(append = false) {
             const tbody = document.getElementById('manager-table-body');
-            tbody.innerHTML = `<tr><td colspan="7" class="text-center py-6 text-slate-400">Loading products from database...</td></tr>`;
+            const search = document.getElementById('manager-search-input').value.trim();
+            if (!append) {
+                allManagerProducts = [];
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center py-6 text-slate-400">Loading products from database...</td></tr>`;
+            }
 
             try {
-                const res = await fetch("/api/sync-all?canonical=1");
+                const params = new URLSearchParams({
+                    q: search,
+                    limit: String(MANAGER_PAGE_SIZE),
+                    offset: String(append ? allManagerProducts.length : 0)
+                });
+                const res = await fetch(`/api/manager-products?${params}`);
                 const data = await res.json();
                 if (data.success && Array.isArray(data.items)) {
-                    allManagerProducts = data.items;
+                    allManagerProducts = append
+                        ? allManagerProducts.concat(data.items)
+                        : data.items;
+                    managerProductTotal = data.total;
                     renderManagerTable(allManagerProducts);
                 } else {
                     tbody.innerHTML = `<tr><td colspan="7" class="text-center py-6 text-red-500">Failed to load products.</td></tr>`;
@@ -5756,6 +5901,8 @@ HTML_TEMPLATE = """
                 tbody.innerHTML = `<tr><td colspan="7" class="text-center py-6 text-red-500">Network error loading products.</td></tr>`;
             }
         }
+
+        let managerProductTotal = 0;
 
         function renderManagerTable(items) {
             const tbody = document.getElementById('manager-table-body');
@@ -5779,19 +5926,24 @@ HTML_TEMPLATE = """
                     </td>
                 </tr>
             `).join('');
+            if (items.length < managerProductTotal) {
+                const moreRow = document.createElement('tr');
+                const moreCell = document.createElement('td');
+                moreCell.colSpan = 7;
+                moreCell.className = 'py-3 text-center';
+                const moreButton = document.createElement('button');
+                moreButton.className = 'rounded-lg bg-slate-100 px-4 py-2 font-semibold text-slate-700 hover:bg-slate-200';
+                moreButton.textContent = `Load next 100 (${items.length} of ${managerProductTotal})`;
+                moreButton.addEventListener('click', () => loadManagerProductTable(true));
+                moreCell.appendChild(moreButton);
+                moreRow.appendChild(moreCell);
+                tbody.appendChild(moreRow);
+            }
         }
 
         function filterManagerTable() {
-            const query = document.getElementById('manager-search-input').value.toLowerCase().trim();
-            if (!query) {
-                renderManagerTable(allManagerProducts);
-                return;
-            }
-            const filtered = allManagerProducts.filter(item => 
-                (item.barcode && item.barcode.toLowerCase().includes(query)) || 
-                (item.name && displayArticleName(item.name).toLowerCase().includes(query))
-            );
-            renderManagerTable(filtered);
+            clearTimeout(managerSearchTimer);
+            managerSearchTimer = setTimeout(() => loadManagerProductTable(), 200);
         }
 
         async function saveInlineProduct(barcode) {
@@ -5830,6 +5982,40 @@ HTML_TEMPLATE = """
         // =========================================================================
         // EXCEL UPLOAD MAPPING LOGIC
         // =========================================================================
+        async function uploadSystemStock() {
+            const fileInput = document.getElementById('system-stock-file');
+            const status = document.getElementById('system-stock-status');
+            if (!fileInput.files.length) {
+                alert('Please select a stock Excel or CSV file first.');
+                return;
+            }
+            if (!navigator.onLine) {
+                alert('System stock upload requires an internet connection.');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            status.className = 'mt-3 text-sm font-medium text-indigo-600';
+            status.textContent = 'Uploading system stock...';
+            status.classList.remove('hidden');
+            try {
+                const response = await fetch('/api/upload-stock', {method: 'POST', body: formData});
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Unable to update system stock.');
+                }
+                status.className = 'mt-3 text-sm font-medium text-emerald-700';
+                status.textContent = data.message;
+                fileInput.value = '';
+                await syncDatabaseInBackground(false);
+                await loadManagerProductTable();
+            } catch (error) {
+                status.className = 'mt-3 text-sm font-medium text-red-600';
+                status.textContent = error.message || 'System stock upload failed.';
+            }
+        }
+
         async function uploadForPreview(mode = "master") {
             currentUploadMode = mode;
             if (!navigator.onLine) {
@@ -6131,7 +6317,165 @@ HTML_TEMPLATE = """
 def index():
     with connect_db() as conn:
         total = conn.execute("SELECT COUNT(*) AS total FROM products").fetchone()["total"]
-    return render_template_string(HTML_TEMPLATE, total_products=total)
+    return render_template_string(
+        HTML_TEMPLATE,
+        total_products=total,
+        employee_password=EMPLOYEE_PASSWORD,
+    )
+
+
+@app.route("/api/auth", methods=["POST"])
+def authenticate():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Invalid request"}), 400
+    password = str(data.get("password", ""))
+    if hmac.compare_digest(password, MANAGER_PASSWORD):
+        return jsonify({"success": True, "role": "manager"})
+    if hmac.compare_digest(password, EMPLOYEE_PASSWORD):
+        return jsonify({"success": True, "role": "employee"})
+    return jsonify({"success": False, "error": "Incorrect password"}), 401
+
+
+@app.route("/api/data-delete", methods=["POST"])
+def delete_data():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Invalid request"}), 400
+    password = str(data.get("password", ""))
+    if not password or not hmac.compare_digest(password, MANAGER_PASSWORD):
+        return jsonify({"success": False, "error": "Incorrect manager password"}), 401
+
+    scope = str(data.get("scope", ""))
+    messages = {
+        "master": "Uploaded catalog data reset to the built-in master catalog.",
+        "price": "All saved daily prices have been deleted.",
+        "power_sku": "Power SKU category data has been deleted.",
+        "kvi": "KVI category data has been deleted.",
+        "stock": "All system stock data has been deleted.",
+    }
+    if scope not in messages:
+        return jsonify({"success": False, "error": "Unsupported data category"}), 400
+
+    try:
+        with connect_db() as conn:
+            if scope == "master":
+                conn.execute("DELETE FROM ean_aliases")
+                conn.execute("DELETE FROM products")
+                conn.commit()
+                seed_builtin_master()
+            elif scope == "price":
+                conn.execute(
+                    """UPDATE products SET price_cx='', price_emb='', price_pc_kgm='',
+                              price_bag='', list_price='', updated_at=?""",
+                    (datetime.now().strftime("%d-%b-%Y %H:%M"),),
+                )
+                bump_catalog_revision(conn)
+            elif scope in {"power_sku", "kvi"}:
+                article_type = "POWER_SKU" if scope == "power_sku" else "KVI"
+                conn.execute(
+                    "UPDATE products SET article_type='NORMAL' WHERE article_type=?",
+                    (article_type,),
+                )
+                bump_catalog_revision(conn)
+            else:
+                conn.execute("DELETE FROM system_stock")
+                bump_catalog_revision(conn)
+            conn.commit()
+        return jsonify({"success": True, "message": messages[scope]})
+    except Exception as exc:
+        app.logger.exception("Unable to delete %s data", scope)
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+
+@app.route("/api/upload-stock", methods=["POST"])
+def upload_system_stock():
+    uploaded_file = request.files.get("file")
+    if uploaded_file is None or not uploaded_file.filename:
+        return jsonify({"success": False, "error": "Select an Excel or CSV file first."}), 400
+
+    extension = os.path.splitext(uploaded_file.filename)[1].lower()
+    try:
+        if extension == ".csv":
+            frame = pd.read_csv(uploaded_file, dtype=str, encoding="utf-8-sig")
+        elif extension in {".xlsx", ".xls"}:
+            frame = pd.read_excel(uploaded_file, dtype=str)
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Unsupported file type. Upload an .xlsx, .xls, or .csv file.",
+            }), 400
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"Unable to read stock file: {exc}"}), 400
+
+    def normalized_header(value):
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    header_lookup = {normalized_header(column): column for column in frame.columns}
+
+    def find_column(names):
+        return next((header_lookup[name] for name in names if name in header_lookup), None)
+
+    code_column = find_column({"articlecode", "itemcode", "code", "sku", "barcode"})
+    name_column = find_column({"articlename", "itemname", "name", "description", "itemdescription"})
+    quantity_column = find_column({
+        "sysqty", "systemqty", "systemquantity", "systemstockqty", "systemstock",
+        "sysquantity", "quantity", "qty",
+    })
+    if not code_column or not name_column or not quantity_column:
+        return jsonify({
+            "success": False,
+            "error": "Required columns not found. Use Article Code, Article Name, and Sys Qty.",
+        }), 400
+
+    records_by_code = {}
+    invalid_rows = []
+    for row_number, row in enumerate(
+        frame[[code_column, name_column, quantity_column]].itertuples(index=False, name=None),
+        start=2,
+    ):
+        code = clean_barcode(row[0])
+        if not code:
+            continue
+        quantity_text = str(row[2] or "").strip().replace(",", "")
+        quantity = pd.to_numeric(quantity_text, errors="coerce")
+        if pd.isna(quantity) or not math.isfinite(float(quantity)):
+            invalid_rows.append(row_number)
+            continue
+        name = "" if pd.isna(row[1]) else normalize_article_name(row[1])
+        name = name or code
+        quantity_value = float(quantity)
+        if quantity_value.is_integer():
+            quantity_value = int(quantity_value)
+        records_by_code[code] = (code, name, quantity_value)
+
+    if invalid_rows:
+        return jsonify({
+            "success": False,
+            "error": f"Invalid or missing Sys Qty on row(s): {', '.join(map(str, invalid_rows[:10]))}. No stock data was changed.",
+        }), 400
+    if not records_by_code:
+        return jsonify({"success": False, "error": "The file contains no stock rows."}), 400
+
+    now_str = datetime.now().strftime("%d-%b-%Y %H:%M")
+    try:
+        with connect_db() as conn:
+            conn.execute("DELETE FROM system_stock")
+            conn.executemany(
+                "INSERT INTO system_stock(article_code, article_name, sys_qty, updated_at) VALUES(?,?,?,?)",
+                [(code, name, quantity, now_str) for code, name, quantity in records_by_code.values()],
+            )
+            bump_catalog_revision(conn)
+            conn.commit()
+    except Exception as exc:
+        app.logger.exception("Unable to update system stock")
+        return jsonify({"success": False, "error": str(exc)}), 500
+
+    return jsonify({
+        "success": True,
+        "uploaded": len(records_by_code),
+        "message": f"System stock updated for {len(records_by_code)} articles.",
+    })
 
 
 @app.route("/manifest.json")
@@ -6163,21 +6507,40 @@ def api_sync_all():
             })
         if canonical_only:
             rows = conn.execute(
-                "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag, "
-                "article_type, list_price, list_price_unit, updated_at FROM products"
+                "SELECT p.barcode, p.name, p.price_cx, p.price_emb, p.price_pc_kgm, p.price_bag, "
+                "p.article_type, p.list_price, p.list_price_unit, p.updated_at, s.sys_qty, "
+                "s.article_name AS stock_name "
+                "FROM products p LEFT JOIN system_stock s ON s.article_code = p.barcode"
             ).fetchall()
             items = [dict(r) for r in rows]
         else:
             rows = conn.execute("""
                 SELECT e.ean_code AS search_key, p.barcode, p.name, p.price_cx, p.price_emb,
                        p.price_pc_kgm, p.price_bag, p.article_type, p.list_price,
-                       p.list_price_unit, p.updated_at
+                       p.list_price_unit, p.updated_at, s.sys_qty,
+                       s.article_name AS stock_name
                 FROM products p JOIN ean_aliases e ON e.article_code = p.barcode
+                LEFT JOIN system_stock s ON s.article_code = p.barcode
             """).fetchall()
             items = []
             for r in rows:
                 item = dict(r)
                 # IndexedDB uses barcode as key, so each EAN becomes an offline-search key.
+                item["article_code"] = item["barcode"]
+                item["barcode"] = item.pop("search_key")
+                items.append(item)
+            stock_only_rows = conn.execute("""
+                SELECT s.article_code AS search_key, s.article_code AS barcode,
+                       s.article_name AS name, '' AS price_cx, '' AS price_emb,
+                       '' AS price_pc_kgm, '' AS price_bag, 'NORMAL' AS article_type,
+                       '' AS list_price, 'UN' AS list_price_unit, s.updated_at,
+                       s.sys_qty, s.article_name AS stock_name
+                FROM system_stock s
+                LEFT JOIN products p ON p.barcode = s.article_code
+                WHERE p.barcode IS NULL
+            """).fetchall()
+            for r in stock_only_rows:
+                item = dict(r)
                 item["article_code"] = item["barcode"]
                 item["barcode"] = item.pop("search_key")
                 items.append(item)
@@ -6229,24 +6592,86 @@ def api_search():
     q = clean_barcode(request.args.get("q", ""))
     if not q:
         return jsonify({"found": False, "items": []})
+    physical_stock_only = request.args.get("physical_stock") == "1"
     with connect_db() as conn:
         resolved = conn.execute("SELECT article_code FROM ean_aliases WHERE ean_code = ?", (q,)).fetchone()
         article_code = resolved["article_code"] if resolved else q
-        rows = conn.execute(
-            "SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag, "
-            "article_type, list_price, list_price_unit FROM products WHERE barcode = ?",
-            (article_code,),
-        ).fetchall()
+        if physical_stock_only:
+            rows = conn.execute(
+                """SELECT DISTINCT COALESCE(p.barcode, s.article_code) AS barcode,
+                          COALESCE(NULLIF(s.article_name, ''), p.name) AS name,
+                          COALESCE(p.price_cx, '') AS price_cx,
+                          COALESCE(p.price_emb, '') AS price_emb,
+                          COALESCE(p.price_pc_kgm, '') AS price_pc_kgm,
+                          COALESCE(p.price_bag, '') AS price_bag,
+                          COALESCE(p.article_type, 'NORMAL') AS article_type,
+                          COALESCE(p.list_price, '') AS list_price,
+                          COALESCE(p.list_price_unit, 'UN') AS list_price_unit,
+                          s.sys_qty
+                   FROM system_stock s
+                   LEFT JOIN products p ON p.barcode = s.article_code
+                   LEFT JOIN ean_aliases e ON e.article_code = s.article_code
+                   WHERE s.sys_qty > 0 AND (s.article_code = ? OR e.ean_code = ?)
+                   LIMIT 15""",
+                (article_code, q),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT p.barcode, p.name, p.price_cx, p.price_emb, p.price_pc_kgm,
+                          p.price_bag, p.article_type, p.list_price, p.list_price_unit,
+                          s.sys_qty
+                   FROM products p LEFT JOIN system_stock s ON s.article_code = p.barcode
+                   WHERE p.barcode = ?""",
+                (article_code,),
+            ).fetchall()
         if not rows:
             like_q = f"%{q}%"
-            rows = conn.execute(
-                """SELECT DISTINCT p.barcode, p.name, p.price_cx, p.price_emb,
-                          p.price_pc_kgm, p.price_bag, p.article_type, p.list_price,
-                          p.list_price_unit
-                   FROM products p LEFT JOIN ean_aliases e ON e.article_code = p.barcode
-                   WHERE p.name LIKE ? OR p.barcode LIKE ? OR e.ean_code LIKE ? LIMIT 15""",
-                (like_q, like_q, like_q),
-            ).fetchall()
+            if physical_stock_only:
+                rows = conn.execute(
+                    """SELECT DISTINCT COALESCE(p.barcode, s.article_code) AS barcode,
+                              COALESCE(NULLIF(s.article_name, ''), p.name) AS name,
+                              COALESCE(p.price_cx, '') AS price_cx,
+                              COALESCE(p.price_emb, '') AS price_emb,
+                              COALESCE(p.price_pc_kgm, '') AS price_pc_kgm,
+                              COALESCE(p.price_bag, '') AS price_bag,
+                              COALESCE(p.article_type, 'NORMAL') AS article_type,
+                              COALESCE(p.list_price, '') AS list_price,
+                              COALESCE(p.list_price_unit, 'UN') AS list_price_unit,
+                              s.sys_qty
+                       FROM system_stock s
+                       LEFT JOIN products p ON p.barcode = s.article_code
+                       LEFT JOIN ean_aliases e ON e.article_code = s.article_code
+                       WHERE s.sys_qty > 0 AND (
+                           s.article_code LIKE ? OR s.article_name LIKE ? OR
+                           COALESCE(p.name, '') LIKE ? OR e.ean_code LIKE ?
+                       )
+                       LIMIT 15""",
+                    (like_q, like_q, like_q, like_q),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT DISTINCT p.barcode, p.name, p.price_cx, p.price_emb,
+                              p.price_pc_kgm, p.price_bag, p.article_type, p.list_price,
+                              p.list_price_unit, s.sys_qty
+                       FROM products p
+                       LEFT JOIN ean_aliases e ON e.article_code = p.barcode
+                       LEFT JOIN system_stock s ON s.article_code = p.barcode
+                       WHERE p.name LIKE ? OR p.barcode LIKE ? OR e.ean_code LIKE ? LIMIT 15""",
+                    (like_q, like_q, like_q),
+                ).fetchall()
+                if not rows:
+                    rows = conn.execute(
+                        """SELECT s.article_code AS barcode, s.article_name AS name,
+                                  '' AS price_cx, '' AS price_emb, '' AS price_pc_kgm,
+                                  '' AS price_bag, 'NORMAL' AS article_type,
+                                  '' AS list_price, 'UN' AS list_price_unit, s.sys_qty
+                           FROM system_stock s
+                           LEFT JOIN products p ON p.barcode = s.article_code
+                           WHERE p.barcode IS NULL
+                             AND (s.article_code LIKE ? OR s.article_name LIKE ?)
+                           LIMIT 15""",
+                        (like_q, like_q),
+                    ).fetchall()
     items = [dict(r) for r in rows]
     return jsonify({"found": len(items) > 0, "items": items})
 
@@ -6266,6 +6691,36 @@ def api_articles():
             (article_type,),
         ).fetchall()
     return jsonify({"success": True, "count": len(rows), "items": [dict(row) for row in rows]})
+
+
+@app.route("/api/manager-products")
+def api_manager_products():
+    try:
+        limit = min(max(int(request.args.get("limit", 100)), 1), 100)
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except ValueError:
+        return jsonify({"success": False, "error": "Invalid product page"}), 400
+
+    query = request.args.get("q", "").strip()
+    where_clause = ""
+    parameters = []
+    if query:
+        where_clause = "WHERE name LIKE ? OR barcode LIKE ?"
+        like_query = f"%{query}%"
+        parameters = [like_query, like_query]
+
+    with connect_db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) AS total FROM products {where_clause}",
+            parameters,
+        ).fetchone()["total"]
+        rows = conn.execute(
+            f"""SELECT barcode, name, price_cx, price_emb, price_pc_kgm, price_bag
+                FROM products {where_clause}
+                ORDER BY name, barcode LIMIT ? OFFSET ?""",
+            [*parameters, limit, offset],
+        ).fetchall()
+    return jsonify({"success": True, "total": total, "items": [dict(row) for row in rows]})
 
 
 @app.route("/api/print-jobs", methods=["POST"])

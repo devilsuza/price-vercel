@@ -63,6 +63,28 @@ Without `DATABASE_URL`, local development continues to use `store_prices.db`.
 The original uploaded Excel/CSV file is temporary and is deleted after a
 successful import; the records imported from it are persistent in Supabase.
 
+### System stock and manager password
+
+The Manager Panel accepts a daily `.xlsx`, `.xls`, or `.csv` system-stock file
+with `Article Code`, `Article Name`, and `Sys Qty` columns. Each successful
+upload replaces the previous system-stock snapshot without changing catalog
+articles or prices. **Physical stock only** search returns articles with a
+system quantity greater than zero; with the checkbox off, search includes the
+full catalog and stock-uploaded articles. The uploaded stock quantity is also
+available when the offline catalog has synced.
+
+The manager password is checked by the server before any delete action. Set a
+private `MANAGER_PASSWORD` environment variable in Vercel and local
+development; if unset, the existing password `2026` remains as a compatibility
+default. `EMPLOYEE_PASSWORD` can similarly override the existing employee PIN
+`123`. Do not put either password in source code or commit it.
+
+The Manager Panel provides separate deletes for the uploaded catalog, daily
+prices, Power SKU list, KVI list, and system stock. Each delete asks for the
+manager password. Deleting the catalog restores the bundled master catalog
+and clears uploaded prices/categories; deleting prices, a category, or stock
+only clears that selected data.
+
 ### Print format values
 
 The portal sends `print_format: "THERMAL"` for normal label printing,
