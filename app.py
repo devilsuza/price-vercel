@@ -5964,8 +5964,8 @@ HTML_TEMPLATE = """
                 status.className = `mt-2 whitespace-pre-line text-sm font-semibold ${failed.length ? 'text-amber-800' : 'text-emerald-800'}`;
                 status.textContent = [
                     `✅ ${queued} jobs queued; ${savedOffline} saved for retry when online.`,
-                    failed.length ? `❌ ${failed.length} failed:\n${failed.slice(0, 5).join('\n')}` : ''
-                ].filter(Boolean).join('\n');
+                    failed.length ? `❌ ${failed.length} failed:\\n${failed.slice(0, 5).join('\\n')}` : ''
+                ].filter(Boolean).join('\\n');
             } finally {
                 button.disabled = false;
             }
