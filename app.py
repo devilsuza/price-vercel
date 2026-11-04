@@ -4486,6 +4486,8 @@ HTML_TEMPLATE = """
             justify-content: center;
             padding: 1rem;
             background: rgba(15, 23, 42, .82);
+            -webkit-backdrop-filter: blur(6px);
+            backdrop-filter: blur(6px);
         }
         #login-overlay.hidden { display: none; }
         .login-card {
