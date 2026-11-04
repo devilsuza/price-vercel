@@ -5,7 +5,9 @@ import csv
 import re
 import hmac
 import math
-from datetime import datetime
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, Response
 import pandas as pd
 
@@ -20,6 +22,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 USE_POSTGRES = bool(DATABASE_URL)
 EMPLOYEE_PASSWORD = os.getenv("EMPLOYEE_PASSWORD", "123").strip()
 MANAGER_PASSWORD = os.getenv("MANAGER_PASSWORD", "2026").strip()
+DEVELOPER_INITIAL_PASSWORD = os.getenv("DEVELOPER_INITIAL_PASSWORD", "").strip()
+DEVELOPER_USER_ID = "NCSA0608"
+SESSION_COOKIE = "price_portal_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
+PASSWORD_HASH_ITERATIONS = 260_000
 if not EMPLOYEE_PASSWORD or not MANAGER_PASSWORD:
     raise RuntimeError("EMPLOYEE_PASSWORD and MANAGER_PASSWORD must not be empty.")
 if IS_VERCEL and not USE_POSTGRES:
@@ -79,6 +86,80 @@ def connect_db():
     connection = sqlite3.connect(DB_NAME)
     connection.row_factory = sqlite3.Row
     return DatabaseConnection(connection)
+
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS
+    )
+    return "pbkdf2_sha256${}${}${}".format(
+        PASSWORD_HASH_ITERATIONS, salt.hex(), digest.hex()
+    )
+
+
+def verify_password(password, encoded_hash):
+    try:
+        algorithm, iterations, salt_hex, digest_hex = encoded_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        expected = bytes.fromhex(digest_hex)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            int(iterations),
+        )
+        return hmac.compare_digest(actual, expected)
+    except (AttributeError, ValueError):
+        return False
+
+
+def create_portal_session(conn, username):
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO portal_sessions(token_hash,username,expires_at) VALUES(?,?,?)",
+        (
+            hashlib.sha256(token.encode("ascii")).hexdigest(),
+            username,
+            (now + timedelta(seconds=SESSION_TTL_SECONDS)).isoformat(),
+        ),
+    )
+    return token
+
+
+def portal_identity():
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with connect_db() as conn:
+        row = conn.execute(
+            """SELECT u.username, u.role, u.must_change_password
+               FROM portal_sessions s
+               JOIN portal_users u ON u.username = s.username
+               WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1""",
+            (token_hash, datetime.now(timezone.utc).isoformat()),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_portal_session_cookie(response, token):
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=IS_VERCEL or request.is_secure,
+        samesite="Strict",
+        path="/",
+    )
+    return response
+
+
+def generate_temporary_password():
+    return secrets.token_urlsafe(12)
 
 
 def normalize_article_name(value):
@@ -260,6 +341,43 @@ def init_db():
             END
             WHERE LOWER(TRIM(print_format)) IN ('normal', 'thermal', 'a4_s3', 's3')
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS portal_users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('developer','employee')),
+                must_change_password INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS portal_sessions (
+                token_hash TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(username) REFERENCES portal_users(username) ON DELETE CASCADE
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_portal_sessions_expiry "
+            "ON portal_sessions(expires_at)"
+        )
+        if DEVELOPER_INITIAL_PASSWORD:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """INSERT INTO portal_users
+                     (username,password_hash,role,must_change_password,active,created_at,updated_at)
+                   VALUES(?,?,'developer',1,1,?,?)
+                   ON CONFLICT(username) DO NOTHING""",
+                (
+                    DEVELOPER_USER_ID,
+                    hash_password(DEVELOPER_INITIAL_PASSWORD),
+                    now,
+                    now,
+                ),
+            )
         conn.commit()
 
 
@@ -4519,7 +4637,7 @@ HTML_TEMPLATE = """
             color: #475569;
             font-size: .75rem;
             font-weight: 700;
-            text-align: left;
+            text-align: center;
             text-transform: uppercase;
             letter-spacing: .05em;
         }
@@ -4623,19 +4741,34 @@ HTML_TEMPLATE = """
             <h2 class="login-title">Welcome back</h2>
             <p class="login-description">Sign in to continue to your price portal</p>
 
-            <label for="login-pin" class="login-label">Employee or manager PIN</label>
+            <label id="login-user-label" for="login-user" class="login-label">Employee ID (manager: leave blank)</label>
+            <input type="text" id="login-user" autocomplete="username" autocapitalize="characters"
+                placeholder="Employee ID"
+                class="login-input mb-3">
+            <label id="login-pin-label" for="login-pin" class="login-label">Password / PIN</label>
             <input type="password" id="login-pin" autofocus autocomplete="current-password"
-                placeholder="Enter your PIN"
+                placeholder="Enter your password or PIN"
                 class="login-input">
             
             <p id="login-error" role="alert" class="login-error text-xs font-bold text-red-600 hidden">❌ Wrong Password! Try again.</p>
 
-            <button type="button" onclick="handleLogin()" class="login-submit">
+            <button type="button" id="login-submit-button" onclick="handleLogin()" class="login-submit">
                 <span>Sign in securely</span>
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M5 12h14M13 6l6 6-6 6"/>
                 </svg>
             </button>
+            <div id="password-change-panel" class="hidden mt-4 text-left">
+                <p class="mb-3 text-sm font-semibold text-slate-700">First login: set a new password (at least 8 characters).</p>
+                <label for="new-login-password" class="login-label">New password</label>
+                <input type="password" id="new-login-password" autocomplete="new-password"
+                    class="login-input mb-3">
+                <label for="confirm-login-password" class="login-label">Confirm new password</label>
+                <input type="password" id="confirm-login-password" autocomplete="new-password"
+                    class="login-input">
+                <p id="password-change-error" role="alert" class="hidden mb-3 text-xs font-bold text-red-700"></p>
+                <button type="button" onclick="submitFirstPasswordChange()" class="login-submit">Save new password</button>
+            </div>
             <p class="login-security-note">🔒 Your access is protected</p>
         </div>
     </div>
@@ -4666,6 +4799,9 @@ HTML_TEMPLATE = """
                 </button>
                 <button onclick="switchMode('manager')" id="btn-manager" class="px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600">
                     ⚙️ Manager Panel
+                </button>
+                <button onclick="switchMode('employees')" id="btn-employee-admin" class="hidden px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600">
+                    👥 Employee Accounts
                 </button>
                 <button onclick="logoutPortal()" class="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-500/90 hover:bg-red-600 text-white shadow">
                     🔒 Logout
@@ -4777,6 +4913,30 @@ HTML_TEMPLATE = """
                 </div>
             </form>
         </dialog>
+
+        <div id="view-employees" class="hidden space-y-6">
+            <div class="rounded-2xl border border-indigo-200 bg-white p-6 shadow-md">
+                <h2 class="text-xl font-bold text-slate-800">Employee Account Management</h2>
+                <p class="mt-1 text-sm text-slate-600">Employee IDs aur password reset hi manage kar sakte hain. Existing passwords kabhi display nahi hote; temporary password reset ke baad ek baar dikhaya jayega. Employee ko first login par password change karna hoga.</p>
+                <form id="create-employee-form" class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]" onsubmit="event.preventDefault(); createEmployeeAccount();">
+                    <label class="sr-only" for="new-employee-id">New employee ID</label>
+                    <input id="new-employee-id" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9._-]{1,39}" autocomplete="off"
+                        placeholder="New employee ID"
+                        class="w-full rounded-xl border-2 border-slate-300 px-4 py-3 focus:border-indigo-600 focus:outline-none">
+                    <button id="create-employee-button" class="rounded-xl bg-indigo-600 px-5 py-3 font-bold text-white hover:bg-indigo-700">Generate employee account</button>
+                </form>
+                <p id="employee-admin-status" role="status" class="mt-3 hidden whitespace-pre-line rounded-xl p-3 text-sm font-semibold"></p>
+            </div>
+            <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-md">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                    <h3 class="text-lg font-bold text-slate-800">Employees</h3>
+                    <button onclick="loadEmployeeAccounts()" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold hover:bg-slate-50">Refresh list</button>
+                </div>
+                <div id="employee-account-list" class="mt-4 space-y-2">
+                    <p class="text-sm text-slate-500">Loading employees...</p>
+                </div>
+            </div>
+        </div>
 
         <!-- ================= MANAGER UPLOAD & EDIT VIEW ================= -->
         <div id="view-manager" class="hidden space-y-6">
@@ -4896,8 +5056,9 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        const EMPLOYEE_PASS = {{ employee_password|tojson }};
         let currentRole = null;
+        let pendingLoginRole = null;
+        let pendingLoginUsername = null;
         let pendingManagerAction = null;
 
         let currentTempFile = null;
@@ -5241,56 +5402,105 @@ HTML_TEMPLATE = """
         document.getElementById('login-pin').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') handleLogin();
         });
+        document.getElementById('login-user').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') document.getElementById('login-pin').focus();
+        });
 
         async function handleLogin() {
             const pinInput = document.getElementById('login-pin');
             const errEl = document.getElementById('login-error');
+            const username = document.getElementById('login-user').value.trim().toUpperCase();
             const pin = pinInput.value.trim();
-            let errorMessage = '❌ Wrong Password! Try again.';
+            let errorMessage = '❌ Employee ID or password is incorrect.';
+
+            if (!navigator.onLine) {
+                errEl.textContent = '❌ Internet connection is required to sign in.';
+                errEl.classList.remove('hidden');
+                return;
+            }
 
             try {
-                let role = null;
-                if (!navigator.onLine && pin === EMPLOYEE_PASS) {
-                    role = 'employee';
-                } else if (navigator.onLine) {
-                    const response = await fetch('/api/auth', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({password: pin})
-                    });
-                    if (response.ok) {
-                        const data = await response.json();
-                        role = data.role;
-                    } else if (response.status !== 401) {
-                        errorMessage = `❌ Login service unavailable (${response.status}). Try again.`;
-                    }
-                }
-                if (role === 'employee' || role === 'manager') {
-                    currentRole = role;
+                const response = await fetch('/api/auth', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password: pin})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    errorMessage = data.error || errorMessage;
+                } else if (data.must_change_password) {
+                    pendingLoginRole = data.role;
+                    pendingLoginUsername = data.username;
+                    document.getElementById('login-user-label').classList.add('hidden');
+                    document.getElementById('login-user').classList.add('hidden');
+                    document.getElementById('login-pin-label').classList.add('hidden');
+                    pinInput.classList.add('hidden');
                     errEl.classList.add('hidden');
-                    pinInput.value = '';
-                    document.getElementById('login-overlay').classList.add('hidden');
-                    updateRoleBadge(role === 'manager' ? "👔 Manager" : "👤 Employee");
-                    switchMode(role === 'manager' ? 'manager' : 'scanner');
-                    scheduleCatalogSync();
+                    document.getElementById('login-submit-button').classList.add('hidden');
+                    document.getElementById('password-change-panel').classList.remove('hidden');
+                    document.getElementById('new-login-password').focus();
+                    return;
+                } else {
+                    finishPortalLogin(data.role, data.username);
                     return;
                 }
             } catch (error) {
-                if (!navigator.onLine && pin === EMPLOYEE_PASS) {
-                    currentRole = 'employee';
-                    errEl.classList.add('hidden');
-                    document.getElementById('login-overlay').classList.add('hidden');
-                    updateRoleBadge("👤 Employee");
-                    switchMode('scanner');
-                    return;
-                } else {
-                    errorMessage = '❌ Login service unavailable. Check your connection and try again.';
-                }
+                errorMessage = '❌ Login service unavailable. Check your connection and try again.';
             }
             errEl.textContent = errorMessage;
             errEl.classList.remove('hidden');
             pinInput.value = "";
             pinInput.focus();
+        }
+
+        function finishPortalLogin(role, username) {
+            currentRole = role;
+            document.getElementById('login-pin').value = '';
+            document.getElementById('login-overlay').classList.add('hidden');
+            const employeeAdminButton = document.getElementById('btn-employee-admin');
+            employeeAdminButton.classList.toggle('hidden', role !== 'developer');
+            document.getElementById('btn-scanner').classList.toggle('hidden', role === 'developer');
+            document.getElementById('btn-manager').classList.toggle('hidden', role === 'developer');
+            updateRoleBadge(role === 'manager'
+                ? '👔 Manager'
+                : role === 'developer' ? `🛠️ Developer · ${username}` : `👤 Employee · ${username}`);
+            switchMode(role === 'manager' ? 'manager' : role === 'developer' ? 'employees' : 'scanner');
+            scheduleCatalogSync();
+        }
+
+        async function submitFirstPasswordChange() {
+            const newPassword = document.getElementById('new-login-password').value;
+            const confirmation = document.getElementById('confirm-login-password').value;
+            const error = document.getElementById('password-change-error');
+            if (newPassword.length < 8) {
+                error.textContent = 'Password must be at least 8 characters.';
+                error.classList.remove('hidden');
+                return;
+            }
+            if (newPassword !== confirmation) {
+                error.textContent = 'Passwords do not match.';
+                error.classList.remove('hidden');
+                return;
+            }
+            try {
+                const response = await fetch('/api/change-password', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({password: newPassword})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || 'Unable to change password.');
+                document.getElementById('password-change-panel').classList.add('hidden');
+                document.getElementById('new-login-password').value = '';
+                document.getElementById('confirm-login-password').value = '';
+                error.classList.add('hidden');
+                finishPortalLogin(pendingLoginRole, pendingLoginUsername);
+                pendingLoginRole = null;
+                pendingLoginUsername = null;
+            } catch (errorResponse) {
+                error.textContent = errorResponse.message || 'Password update failed.';
+                error.classList.remove('hidden');
+            }
         }
 
         function updateRoleBadge(text) {
@@ -5301,14 +5511,39 @@ HTML_TEMPLATE = """
 
         function logoutPortal() {
             stopCamera();
+            fetch('/api/logout', {method: 'POST'}).catch(error => {
+                console.warn('Unable to close portal session:', error);
+            });
             currentRole = null;
+            pendingLoginRole = null;
+            pendingLoginUsername = null;
             document.getElementById('login-pin').value = "";
+            document.getElementById('login-user').value = "";
             document.getElementById('login-error').classList.add('hidden');
+            document.getElementById('password-change-panel').classList.add('hidden');
+            for (const id of ['login-user-label', 'login-user', 'login-pin-label', 'login-pin', 'login-submit-button']) {
+                document.getElementById(id).classList.remove('hidden');
+            }
+            document.getElementById('btn-employee-admin').classList.add('hidden');
+            document.getElementById('btn-scanner').classList.remove('hidden');
+            document.getElementById('btn-manager').classList.remove('hidden');
             document.getElementById('login-overlay').classList.remove('hidden');
             document.getElementById('login-pin').focus();
         }
 
         function switchMode(mode) {
+            if (currentRole === 'developer' && mode !== 'employees') {
+                alert('Developer access is limited to employee accounts.');
+                return;
+            }
+            if (mode === 'employees' && currentRole !== 'developer') {
+                alert('Developer access is required.');
+                return;
+            }
+            if (mode === 'manager' && currentRole === 'developer') {
+                alert('Developer access is limited to employee accounts.');
+                return;
+            }
             if (mode === 'manager' && currentRole !== 'manager') {
                 openManagerAction('manager_access');
                 return;
@@ -5316,22 +5551,131 @@ HTML_TEMPLATE = """
 
             const scannerView = document.getElementById('view-scanner');
             const managerView = document.getElementById('view-manager');
+            const employeeView = document.getElementById('view-employees');
             const btnScanner = document.getElementById('btn-scanner');
             const btnManager = document.getElementById('btn-manager');
+            const btnEmployeeAdmin = document.getElementById('btn-employee-admin');
 
             if (mode === 'scanner') {
                 scannerView.classList.remove('hidden');
                 managerView.classList.add('hidden');
+                employeeView.classList.add('hidden');
                 btnScanner.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium bg-white text-indigo-700 shadow";
                 btnManager.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
+                btnEmployeeAdmin.className = "hidden px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
                 prepareScannerInput();
+            } else if (mode === 'employees' && currentRole === 'developer') {
+                scannerView.classList.add('hidden');
+                managerView.classList.add('hidden');
+                employeeView.classList.remove('hidden');
+                btnScanner.className = "hidden px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
+                btnManager.className = "hidden px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
+                btnEmployeeAdmin.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium bg-white text-indigo-700 shadow";
+                loadEmployeeAccounts();
             } else {
                 scannerView.classList.add('hidden');
+                employeeView.classList.add('hidden');
                 managerView.classList.remove('hidden');
                 btnManager.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium bg-white text-indigo-700 shadow";
                 btnScanner.className = "px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
+                btnEmployeeAdmin.className = currentRole === 'developer'
+                    ? "px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600"
+                    : "hidden px-3.5 py-1.5 rounded-lg text-sm font-medium text-indigo-100 hover:bg-indigo-600";
                 stopCamera();
                 loadManagerProductTable();
+            }
+        }
+
+        function setEmployeeAdminStatus(message, kind = 'success') {
+            const status = document.getElementById('employee-admin-status');
+            status.className = `mt-3 whitespace-pre-line rounded-xl p-3 text-sm font-semibold ${
+                kind === 'error'
+                    ? 'border border-red-200 bg-red-50 text-red-800'
+                    : 'border border-emerald-200 bg-emerald-50 text-emerald-800'
+            }`;
+            status.textContent = message;
+        }
+
+        async function loadEmployeeAccounts() {
+            const container = document.getElementById('employee-account-list');
+            container.textContent = 'Loading employees...';
+            try {
+                const response = await fetch('/api/employees');
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || 'Unable to load employee list.');
+                container.replaceChildren();
+                if (!data.items.length) {
+                    const empty = document.createElement('p');
+                    empty.className = 'text-sm text-slate-500';
+                    empty.textContent = 'No employee accounts yet.';
+                    container.appendChild(empty);
+                    return;
+                }
+                for (const employee of data.items) {
+                    const row = document.createElement('div');
+                    row.className = 'flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 p-3';
+                    const info = document.createElement('div');
+                    const name = document.createElement('p');
+                    name.className = 'font-bold text-slate-800';
+                    name.textContent = employee.username;
+                    const state = document.createElement('p');
+                    state.className = 'text-xs text-slate-500';
+                    state.textContent = employee.must_change_password
+                        ? 'Temporary password issued; change required at next login'
+                        : 'Password active';
+                    info.append(name, state);
+                    const reset = document.createElement('button');
+                    reset.type = 'button';
+                    reset.className = 'rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-50';
+                    reset.textContent = 'Reset password';
+                    reset.addEventListener('click', () => resetEmployeePassword(employee.username));
+                    row.append(info, reset);
+                    container.appendChild(row);
+                }
+            } catch (error) {
+                container.textContent = error.message || 'Unable to load employee list.';
+            }
+        }
+
+        async function createEmployeeAccount() {
+            const input = document.getElementById('new-employee-id');
+            const button = document.getElementById('create-employee-button');
+            const username = input.value.trim().toUpperCase();
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/employees', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || 'Unable to create employee.');
+                setEmployeeAdminStatus(
+                    `Employee ID: ${data.username}\nTemporary password (share securely; shown only now): ${data.temporary_password}`
+                );
+                input.value = '';
+                await loadEmployeeAccounts();
+            } catch (error) {
+                setEmployeeAdminStatus(error.message || 'Unable to create employee.', 'error');
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function resetEmployeePassword(username) {
+            if (!confirm(`Reset password for ${username}? Their existing sessions will be signed out.`)) return;
+            try {
+                const response = await fetch(`/api/employees/${encodeURIComponent(username)}/reset-password`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || 'Unable to reset password.');
+                setEmployeeAdminStatus(
+                    `Employee ID: ${data.username}\nNew temporary password (share securely; shown only now): ${data.temporary_password}`
+                );
+                await loadEmployeeAccounts();
+            } catch (error) {
+                setEmployeeAdminStatus(error.message || 'Unable to reset password.', 'error');
             }
         }
 
@@ -5389,6 +5733,11 @@ HTML_TEMPLATE = """
         }
 
         async function submitManagerAction() {
+            if (currentRole === 'developer') {
+                closeManagerAction();
+                alert('Developer access is limited to employee accounts.');
+                return;
+            }
             const passwordInput = document.getElementById('manager-action-password');
             const errorEl = document.getElementById('manager-action-error');
             const submitButton = document.getElementById('manager-action-submit');
@@ -6593,7 +6942,6 @@ def index():
     return render_template_string(
         HTML_TEMPLATE,
         total_products=total,
-        employee_password=EMPLOYEE_PASSWORD,
     )
 
 
@@ -6603,11 +6951,197 @@ def authenticate():
     if not isinstance(data, dict):
         return jsonify({"success": False, "error": "Invalid request"}), 400
     password = str(data.get("password", ""))
-    if hmac.compare_digest(password, MANAGER_PASSWORD):
+    username = str(data.get("username", "")).strip().upper()
+    if not username and hmac.compare_digest(password, MANAGER_PASSWORD):
         return jsonify({"success": True, "role": "manager"})
-    if hmac.compare_digest(password, EMPLOYEE_PASSWORD):
-        return jsonify({"success": True, "role": "employee"})
-    return jsonify({"success": False, "error": "Incorrect password"}), 401
+    if not password:
+        return jsonify({"success": False, "error": "Enter your password or PIN."}), 400
+    if not username:
+        return jsonify({"success": False, "error": "Enter your employee ID. Managers can leave it blank."}), 400
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{1,39}", username):
+        return jsonify({"success": False, "error": "Employee ID format is invalid."}), 400
+
+    with connect_db() as conn:
+        user = conn.execute(
+            "SELECT username,password_hash,role,must_change_password,active "
+            "FROM portal_users WHERE username=?",
+            (username,),
+        ).fetchone()
+        if not user and username == DEVELOPER_USER_ID:
+            return jsonify({
+                "success": False,
+                "error": "Developer account is not initialized. Configure DEVELOPER_INITIAL_PASSWORD first.",
+            }), 503
+        if not user and username != DEVELOPER_USER_ID and hmac.compare_digest(
+            password, EMPLOYEE_PASSWORD
+        ):
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """INSERT INTO portal_users
+                     (username,password_hash,role,must_change_password,active,created_at,updated_at)
+                   VALUES(?,?,'employee',1,1,?,?)
+                   ON CONFLICT(username) DO NOTHING""",
+                (username, hash_password(password), now, now),
+            )
+            user = conn.execute(
+                "SELECT username,password_hash,role,must_change_password,active "
+                "FROM portal_users WHERE username=?",
+                (username,),
+            ).fetchone()
+        if not user or not user["active"] or not verify_password(
+            password, user["password_hash"]
+        ):
+            return jsonify({"success": False, "error": "Employee ID or password is incorrect."}), 401
+
+        token = create_portal_session(conn, user["username"])
+        conn.execute(
+            "DELETE FROM portal_sessions WHERE expires_at <= ?",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.commit()
+        response = jsonify({
+            "success": True,
+            "role": user["role"],
+            "username": user["username"],
+            "must_change_password": bool(user["must_change_password"]),
+        })
+    return set_portal_session_cookie(response, token)
+
+
+@app.route("/api/change-password", methods=["POST"])
+def change_portal_password():
+    identity = portal_identity()
+    if not identity:
+        return jsonify({"success": False, "error": "Please sign in again."}), 401
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Invalid request."}), 400
+    password = str(data.get("password", ""))
+    if len(password) < 8:
+        return jsonify({"success": False, "error": "Password must be at least 8 characters."}), 400
+    now = datetime.now(timezone.utc).isoformat()
+    session_token = request.cookies.get(SESSION_COOKIE, "")
+    with connect_db() as conn:
+        conn.execute(
+            "UPDATE portal_users SET password_hash=?,must_change_password=0,updated_at=? "
+            "WHERE username=?",
+            (hash_password(password), now, identity["username"]),
+        )
+        conn.execute(
+            "DELETE FROM portal_sessions WHERE username=? AND token_hash<>?",
+            (
+                identity["username"],
+                hashlib.sha256(session_token.encode("utf-8")).hexdigest(),
+            ),
+        )
+        conn.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/logout", methods=["POST"])
+def logout_portal():
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if token:
+        with connect_db() as conn:
+            conn.execute(
+                "DELETE FROM portal_sessions WHERE token_hash=?",
+                (hashlib.sha256(token.encode("utf-8")).hexdigest(),),
+            )
+            conn.commit()
+    response = jsonify({"success": True})
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=IS_VERCEL or request.is_secure, httponly=True, samesite="Strict")
+    return response
+
+
+def require_developer():
+    identity = portal_identity()
+    if not identity or identity["role"] != "developer" or identity["must_change_password"]:
+        return None
+    return identity
+
+
+@app.route("/api/employees")
+def list_employee_accounts():
+    if not require_developer():
+        return jsonify({"success": False, "error": "Developer access required."}), 403
+    with connect_db() as conn:
+        rows = conn.execute(
+            """SELECT username,must_change_password,created_at
+               FROM portal_users WHERE role='employee' AND active=1
+               ORDER BY username"""
+        ).fetchall()
+    return jsonify({
+        "success": True,
+        "items": [
+            {
+                "username": row["username"],
+                "must_change_password": bool(row["must_change_password"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ],
+    })
+
+
+@app.route("/api/employees", methods=["POST"])
+def create_employee_account():
+    if not require_developer():
+        return jsonify({"success": False, "error": "Developer access required."}), 403
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Invalid request."}), 400
+    username = str(data.get("username", "")).strip().upper()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{1,39}", username):
+        return jsonify({"success": False, "error": "Use a 2–40 character ID with letters, numbers, dot, underscore, or hyphen."}), 400
+    if username == DEVELOPER_USER_ID:
+        return jsonify({"success": False, "error": "This ID is reserved for the developer."}), 400
+
+    temporary_password = generate_temporary_password()
+    now = datetime.now(timezone.utc).isoformat()
+    with connect_db() as conn:
+        inserted = conn.execute(
+            """INSERT INTO portal_users
+                 (username,password_hash,role,must_change_password,active,created_at,updated_at)
+               VALUES(?,?,'employee',1,1,?,?)
+               ON CONFLICT(username) DO NOTHING
+               RETURNING username""",
+            (username, hash_password(temporary_password), now, now),
+        ).fetchone()
+        if not inserted:
+            return jsonify({"success": False, "error": "Employee ID already exists."}), 409
+        conn.commit()
+    return jsonify({
+        "success": True,
+        "username": username,
+        "temporary_password": temporary_password,
+    }), 201
+
+
+@app.route("/api/employees/<username>/reset-password", methods=["POST"])
+def reset_employee_password(username):
+    if not require_developer():
+        return jsonify({"success": False, "error": "Developer access required."}), 403
+    username = str(username).strip().upper()
+    if username == DEVELOPER_USER_ID:
+        return jsonify({"success": False, "error": "Developer password cannot be reset here."}), 400
+    temporary_password = generate_temporary_password()
+    now = datetime.now(timezone.utc).isoformat()
+    with connect_db() as conn:
+        result = conn.execute(
+            """UPDATE portal_users
+               SET password_hash=?,must_change_password=1,updated_at=?
+               WHERE username=? AND role='employee' AND active=1""",
+            (hash_password(temporary_password), now, username),
+        )
+        if result.rowcount == 0:
+            return jsonify({"success": False, "error": "Employee account not found."}), 404
+        conn.execute("DELETE FROM portal_sessions WHERE username=?", (username,))
+        conn.commit()
+    return jsonify({
+        "success": True,
+        "username": username,
+        "temporary_password": temporary_password,
+    })
 
 
 @app.route("/api/data-delete", methods=["POST"])
