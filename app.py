@@ -5711,10 +5711,62 @@ HTML_TEMPLATE = """
                 return;
             }
 
+            const bulkPanel = document.createElement('div');
+            bulkPanel.className = 'mt-3 rounded-xl border border-indigo-200 bg-white p-3';
+            const bulkControls = document.createElement('div');
+            bulkControls.className = 'grid grid-cols-1 gap-2 sm:grid-cols-4';
+
+            const priceSelect = document.createElement('select');
+            priceSelect.className = 'rounded-lg border border-slate-300 p-2 text-sm';
+            priceSelect.setAttribute('aria-label', 'Bulk print price type');
+            priceSelect.innerHTML = `
+                <option value="all">ALL available prices / UOM</option>
+                <option value="cx">CX</option>
+                <option value="emb">EMB</option>
+                <option value="pc_kgm">PC/KGM (UN)</option>
+                <option value="bag">BAG</option>`;
+
+            const copiesInput = document.createElement('input');
+            copiesInput.type = 'number';
+            copiesInput.min = '1';
+            copiesInput.max = '100';
+            copiesInput.step = '1';
+            copiesInput.value = '1';
+            copiesInput.className = 'rounded-lg border border-slate-300 p-2 text-sm';
+            copiesInput.setAttribute('aria-label', 'Copies per price label');
+
+            const formatSelect = document.createElement('select');
+            formatSelect.className = 'rounded-lg border border-slate-300 p-2 text-sm';
+            formatSelect.setAttribute('aria-label', 'Bulk print format');
+            formatSelect.innerHTML = `
+                <option value="NORMAL_QR">NORMAL_QR</option>
+                <option value="NORMAL_QR_S3">NORMAL_QR_S3</option>`;
+
+            const bulkButton = document.createElement('button');
+            bulkButton.type = 'button';
+            bulkButton.className = 'rounded-lg bg-indigo-600 px-3 py-2 text-sm font-bold text-white hover:bg-indigo-700';
+            bulkButton.textContent = '🖨️ Bulk Print All';
+            bulkButton.addEventListener('click', () => bulkPrintSpecialArticles(
+                items,
+                articleType,
+                priceSelect.value,
+                copiesInput.value,
+                formatSelect.value,
+                bulkButton,
+                bulkStatus
+            ));
+            bulkControls.append(priceSelect, copiesInput, formatSelect, bulkButton);
+
+            const bulkStatus = document.createElement('p');
+            bulkStatus.className = 'mt-2 hidden whitespace-pre-line text-sm font-semibold';
+            bulkPanel.append(bulkControls, bulkStatus);
+            list.appendChild(bulkPanel);
+
             const entries = document.createElement('div');
             entries.className = 'mt-3 grid min-w-0 gap-2';
             for (const [index, item] of items.entries()) {
                 const rowId = `special-article-${index}`;
+                const articleCode = item.article_code || item.barcode;
                 const button = document.createElement('button');
                 button.type = 'button';
                 button.className = 'flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-sm hover:border-indigo-400 hover:bg-indigo-50 sm:gap-3 sm:p-4';
@@ -5723,7 +5775,7 @@ HTML_TEMPLATE = """
                 const resultId = `${rowId}-prices`;
                 const statusId = `${rowId}-status`;
                 button.dataset.actionId = actionId;
-                button.addEventListener('click', () => openSpecialArticle(item.barcode, button, panel, result, status));
+                button.addEventListener('click', () => openSpecialArticle(articleCode, button, panel, result, status));
 
                 const details = document.createElement('span');
                 details.className = 'min-w-0';
@@ -5732,7 +5784,7 @@ HTML_TEMPLATE = """
                 name.textContent = displayArticleName(item.name) || item.barcode;
                 const code = document.createElement('span');
                 code.className = 'mt-1 block text-xs text-slate-500';
-                code.textContent = `Article Code: ${item.barcode}`;
+                code.textContent = `Article Code: ${articleCode}`;
                 details.append(name, code);
 
                 const action = document.createElement('span');
@@ -5762,6 +5814,117 @@ HTML_TEMPLATE = """
             list.appendChild(entries);
         }
 
+        const SPECIAL_PRICE_TYPES = [
+            {key: 'cx', field: 'price_cx', unit: 'CX'},
+            {key: 'emb', field: 'price_emb', unit: 'EMB'},
+            {key: 'pc_kgm', field: 'price_pc_kgm', unit: 'UN'},
+            {key: 'bag', field: 'price_bag', unit: 'BAG'}
+        ];
+
+        async function bulkPrintSpecialArticles(items, articleType, selectedPriceType, copiesValue, printFormat, button, status) {
+            const copies = Number(copiesValue);
+            if (!Number.isInteger(copies) || copies < 1 || copies > 100) {
+                status.className = 'mt-2 whitespace-pre-line text-sm font-semibold text-red-700';
+                status.textContent = 'Copies 1 se 100 ke beech whole number honi chahiye.';
+                return;
+            }
+
+            const jobs = [];
+            for (const item of items) {
+                for (const priceType of SPECIAL_PRICE_TYPES) {
+                    if (selectedPriceType !== 'all' && selectedPriceType !== priceType.key) continue;
+                    const price = String(item[priceType.field] || '').trim();
+                    if (!price) continue;
+                    jobs.push({
+                        article_code: item.article_code || item.barcode,
+                        item_name: displayArticleName(item.name),
+                        price,
+                        unit: priceType.unit,
+                        price_type: priceType.key,
+                        article_type: articleType,
+                        copies,
+                        print_format: printFormat,
+                        printer_id: 'printer1',
+                        request_id: createPrintRequestId()
+                    });
+                }
+            }
+
+            if (!jobs.length) {
+                status.className = 'mt-2 whitespace-pre-line text-sm font-semibold text-amber-800';
+                status.textContent = 'Selected price/UOM ke liye koi price available nahi hai.';
+                return;
+            }
+            const totalLabels = jobs.length * copies;
+            if (!confirm(
+                `${jobs.length} price/UOM jobs (${totalLabels} total labels) ${articleType} ke liye EPSON par queue karein?`
+            )) return;
+
+            button.disabled = true;
+            status.className = 'mt-2 whitespace-pre-line text-sm font-semibold text-indigo-800';
+            status.textContent = `⏳ ${jobs.length} price/UOM jobs queue ho rahe hain...`;
+            let queued = 0;
+            let savedOffline = 0;
+            const failed = [];
+
+            const queueOne = async (job) => {
+                const offlineJob = {
+                    request_id: job.request_id,
+                    job,
+                    status: 'pending',
+                    created_at: new Date().toISOString()
+                };
+                if (!navigator.onLine) {
+                    try {
+                        await savePendingPrintJob(offlineJob);
+                        savedOffline++;
+                    } catch (error) {
+                        failed.push(`${job.article_code} ${job.unit}: Unable to save offline job.`);
+                    }
+                    return;
+                }
+
+                try {
+                    const response = await fetch('/api/print-jobs', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(job)
+                    });
+                    const data = await response.json();
+                    if (response.ok && data.success) {
+                        queued++;
+                    } else if (response.status >= 500) {
+                        await savePendingPrintJob(offlineJob);
+                        savedOffline++;
+                    } else {
+                        failed.push(`${job.article_code} ${job.unit}: ${data.error || 'Queue request failed.'}`);
+                    }
+                } catch (error) {
+                    try {
+                        await savePendingPrintJob(offlineJob);
+                        savedOffline++;
+                    } catch (storageError) {
+                        failed.push(`${job.article_code} ${job.unit}: Unable to queue or save offline.`);
+                    }
+                }
+            };
+
+            try {
+                for (let index = 0; index < jobs.length; index += 5) {
+                    await Promise.all(jobs.slice(index, index + 5).map(queueOne));
+                    status.textContent = `⏳ Processed ${Math.min(index + 5, jobs.length)} of ${jobs.length} jobs...`;
+                }
+                if (savedOffline) await updatePendingPrintBadge();
+                status.className = `mt-2 whitespace-pre-line text-sm font-semibold ${failed.length ? 'text-amber-800' : 'text-emerald-800'}`;
+                status.textContent = [
+                    `✅ ${queued} jobs queued; ${savedOffline} saved for retry when online.`,
+                    failed.length ? `❌ ${failed.length} failed:\n${failed.slice(0, 5).join('\n')}` : ''
+                ].filter(Boolean).join('\n');
+            } finally {
+                button.disabled = false;
+            }
+        }
+
         async function browseSpecialArticles(articleType) {
             const list = document.getElementById('special-article-list');
             if (!list.classList.contains('hidden') && list.dataset.articleType === articleType) {
@@ -5778,7 +5941,12 @@ HTML_TEMPLATE = """
                     return new Promise((resolve, reject) => {
                         const transaction = db.transaction(STORE_NAME, 'readonly');
                         const request = transaction.objectStore(STORE_NAME).getAll();
-                        request.onsuccess = () => resolve(request.result.filter(item => item.article_type === articleType));
+                        request.onsuccess = () => {
+                            const articles = request.result.filter(item => item.article_type === articleType);
+                            resolve([...new Map(
+                                articles.map(item => [item.article_code || item.barcode, item])
+                            ).values()]);
+                        };
                         request.onerror = () => reject(request.error);
                     });
                 };

@@ -133,6 +133,11 @@ rejects other formats. Ordinary items continue to use Normal/S3.
 Employees can browse the KVI and Power SKU lists from the scanner screen. Selecting
 an article opens its current daily prices and print action directly beneath that
 article; after a print job is queued, its price/print panel closes automatically.
+Each category list also has **Bulk Print All**: choose **ALL available prices /
+UOM** to queue every non-empty CX, EMB, PC/KGM (UN), and BAG price for every
+article, or choose one price type. Set 1–100 copies per label and select
+`NORMAL_QR` or `NORMAL_QR_S3`; bulk jobs are routed to EPSON and can be saved
+for retry if the device is offline.
 Clicking the same category button again closes its list, while normal price search
 results appear directly beneath the search box. The category lists are also
 available offline after the catalog has synced to the device.
