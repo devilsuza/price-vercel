@@ -4461,6 +4461,7 @@ HTML_TEMPLATE = """
     <style>
         .hidden { display: none !important; }
         body.portal-body {
+            font-family: Arial, Helvetica, sans-serif;
             background: #f1f5f9;
         }
         nav.portal-nav {
@@ -4491,11 +4492,54 @@ HTML_TEMPLATE = """
             position: relative;
             width: 100%;
             max-width: 26rem;
+            box-sizing: border-box;
             padding: 2rem;
             border-radius: 1rem;
             background: #fff;
             box-shadow: 0 16px 40px rgba(2, 6, 23, .24);
             text-align: center;
+        }
+        .login-title {
+            margin: 0;
+            color: #0f172a;
+            font-size: 1.5rem;
+            font-weight: 800;
+            line-height: 1.25;
+        }
+        .login-description {
+            margin: .5rem 0 1.75rem;
+            color: #64748b;
+            font-size: .875rem;
+        }
+        .login-label {
+            display: block;
+            margin: 0 0 .5rem;
+            color: #475569;
+            font-size: .75rem;
+            font-weight: 700;
+            text-align: left;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+        }
+        .login-input {
+            box-sizing: border-box;
+            margin: 0 0 1rem;
+        }
+        .login-error {
+            margin: 0 0 .75rem;
+            color: #b91c1c;
+            font-size: .75rem;
+            font-weight: 700;
+        }
+        .login-submit {
+            box-sizing: border-box;
+            min-height: 3.25rem;
+        }
+        .login-security-note {
+            margin: 1.5rem 0 0;
+            color: #94a3b8;
+            font-size: .6875rem;
+            font-weight: 500;
         }
         .login-card::before {
             position: absolute;
@@ -4515,6 +4559,7 @@ HTML_TEMPLATE = """
             color: #4338ca;
         }
         .login-kicker {
+            margin: 0 0 .5rem;
             color: #4f46e5;
             font-size: .68rem;
             font-weight: 800;
@@ -4573,15 +4618,15 @@ HTML_TEMPLATE = """
                 </svg>
             </div>
             <p class="login-kicker mb-2">SECURE STORE ACCESS</p>
-            <h2 class="text-2xl font-extrabold tracking-tight text-slate-900">Welcome back</h2>
-            <p class="mt-2 mb-7 text-sm text-slate-500">Sign in to continue to your price portal</p>
+            <h2 class="login-title">Welcome back</h2>
+            <p class="login-description">Sign in to continue to your price portal</p>
 
-            <label for="login-pin" class="mb-2 block text-left text-xs font-bold uppercase tracking-wider text-slate-600">Employee or manager PIN</label>
+            <label for="login-pin" class="login-label">Employee or manager PIN</label>
             <input type="password" id="login-pin" autofocus autocomplete="current-password"
                 placeholder="Enter your PIN"
-                class="login-input mb-4">
+                class="login-input">
             
-            <p id="login-error" role="alert" class="mb-3 text-xs font-bold text-red-600 hidden">❌ Wrong Password! Try again.</p>
+            <p id="login-error" role="alert" class="login-error text-xs font-bold text-red-600 hidden">❌ Wrong Password! Try again.</p>
 
             <button type="button" onclick="handleLogin()" class="login-submit">
                 <span>Sign in securely</span>
@@ -4589,7 +4634,7 @@ HTML_TEMPLATE = """
                     <path d="M5 12h14M13 6l6 6-6 6"/>
                 </svg>
             </button>
-            <p class="mt-6 text-[11px] font-medium text-slate-400">🔒 Your access is protected</p>
+            <p class="login-security-note">🔒 Your access is protected</p>
         </div>
     </div>
 
