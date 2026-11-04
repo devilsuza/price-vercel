@@ -126,6 +126,14 @@ def init_db():
                 updated_at TEXT
             )
         """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_products_barcode_lower "
+            "ON products(LOWER(barcode))"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_products_name_lower "
+            "ON products(LOWER(name))"
+        )
         if USE_POSTGRES:
             existing_cols = [
                 row["column_name"] for row in conn.execute(
@@ -169,6 +177,10 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ean_article ON ean_aliases(article_code)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ean_code_lower "
+            "ON ean_aliases(LOWER(ean_code))"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS system_stock (
                 article_code TEXT PRIMARY KEY,
@@ -4672,13 +4684,13 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <div id="reader-container" class="hidden mt-4 bg-slate-900 p-3 rounded-2xl max-w-sm mx-auto text-center">
+                <dialog id="scanner-dialog" class="w-full max-w-lg rounded-2xl bg-slate-900 p-3 text-center shadow-2xl backdrop:bg-slate-900/70">
                     <div class="flex justify-between items-center text-white text-xs font-semibold mb-2 px-1">
                         <span>📷 Point camera at Barcode or QR Code</span>
-                        <button onclick="stopCamera()" class="bg-red-500 hover:bg-red-600 text-white px-2.5 py-1 rounded-md">✕ Close</button>
+                        <button type="button" onclick="stopCamera()" class="bg-red-500 hover:bg-red-600 text-white px-2.5 py-1 rounded-md">✕ Close</button>
                     </div>
                     <div id="reader" class="w-full overflow-hidden rounded-xl border-2 border-emerald-400 bg-black"></div>
-                </div>
+                </dialog>
             </div>
 
             <div id="special-article-list" class="hidden"></div>
@@ -4844,6 +4856,9 @@ HTML_TEMPLATE = """
         let currentUploadMode = "master";
         let html5QrCode = null;
         let cameraActive = false;
+        let cameraStarting = false;
+        let cameraStartToken = 0;
+        const searchRequests = new WeakMap();
         let allManagerProducts = [];
         const MANAGER_PAGE_SIZE = 100;
         let managerSearchTimer = null;
@@ -5483,7 +5498,8 @@ HTML_TEMPLATE = """
         }
 
         function hidePrintedPriceDetails(status) {
-            const details = document.getElementById(status.dataset.detailsId);
+            const details = document.getElementById(status.dataset.detailsId)
+                || (status.id === 'print-status' ? document.getElementById('price-result') : null);
             details?.classList.add('hidden');
             const action = document.getElementById(status.dataset.actionId);
             if (action) action.textContent = 'View prices & print';
@@ -5636,10 +5652,14 @@ HTML_TEMPLATE = """
 
             const physicalStockOnly = document.getElementById('physical-stock-only').checked;
             const resultBox = resultTarget || document.getElementById('price-result');
+            searchRequests.get(resultBox)?.abort();
+            const controller = new AbortController();
+            searchRequests.set(resultBox, controller);
             resultBox.classList.remove('hidden');
 
             if (!navigator.onLine) {
                 const localItems = await searchInLocalDB(query, physicalStockOnly);
+                if (searchRequests.get(resultBox) !== controller) return;
                 displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
                 if (!resultTarget) inputEl.select();
                 return;
@@ -5648,19 +5668,25 @@ HTML_TEMPLATE = """
             resultBox.innerHTML = `<div class="bg-white p-6 rounded-2xl shadow text-center text-slate-500 font-medium">⏳ Fetching price details...</div>`;
 
             try {
-                const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 2500);
-
-                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&physical_stock=${physicalStockOnly ? '1' : '0'}`, {
-                    signal: controller.signal
-                });
-                clearTimeout(timeoutId);
-
-                const data = await res.json();
+                let res;
+                let data;
+                try {
+                    res = await fetch(`/api/search?q=${encodeURIComponent(query)}&physical_stock=${physicalStockOnly ? '1' : '0'}`, {
+                        signal: controller.signal
+                    });
+                    if (!res.ok) throw new Error(`Search failed (${res.status}).`);
+                    data = await res.json();
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+                if (searchRequests.get(resultBox) !== controller) return;
                 displaySearchResults(data.items || [], query, "🟢 Online Live DB", resultBox);
                 if (!resultTarget) inputEl.select();
-            } catch (err) {
+            } catch {
+                if (searchRequests.get(resultBox) !== controller) return;
                 const localItems = await searchInLocalDB(query, physicalStockOnly);
+                if (searchRequests.get(resultBox) !== controller) return;
                 displaySearchResults(localItems, query, "⚡ Offline Local DB", resultBox);
                 if (!resultTarget) inputEl.select();
             }
@@ -5817,26 +5843,30 @@ HTML_TEMPLATE = """
         }
 
         async function toggleCamera() {
-            if (cameraActive) {
+            const dialog = document.getElementById('scanner-dialog');
+            if (cameraActive || dialog.open) {
                 stopCamera();
                 return;
             }
 
-            const container = document.getElementById('reader-container');
+            const startToken = ++cameraStartToken;
             const inlineBtn = document.getElementById('inline-scan-btn');
             inlineBtn.disabled = true;
-            container.classList.remove('hidden');
+            dialog.showModal();
             inlineBtn.classList.replace('bg-indigo-50', 'bg-emerald-100');
             inlineBtn.classList.replace('text-indigo-700', 'text-emerald-700');
 
             try {
                 await loadQrScannerLibrary();
-                html5QrCode = new Html5Qrcode("reader");
-                cameraActive = true;
-                await html5QrCode.start(
+                if (startToken !== cameraStartToken || !dialog.open) return;
+                const scanner = new Html5Qrcode("reader");
+                html5QrCode = scanner;
+                cameraStarting = true;
+                await scanner.start(
                     { facingMode: "environment" },
                     { fps: 12, qrbox: { width: 250, height: 150 } },
                     (decodedText) => {
+                        if (!cameraActive) return;
                         playBeep();
                         const scanBox = document.getElementById('scan-input');
                         scanBox.value = decodedText;
@@ -5847,27 +5877,54 @@ HTML_TEMPLATE = """
                     },
                     () => {}
                 );
+                cameraStarting = false;
+                if (startToken !== cameraStartToken || !dialog.open) {
+                    if (html5QrCode === scanner) html5QrCode = null;
+                    await scanner.stop().catch(() => {});
+                    scanner.clear();
+                    return;
+                }
+                cameraActive = true;
             } catch (err) {
-                alert(err.message || "Camera open nahi ho paya. Please allow camera permission.");
-                stopCamera();
+                cameraStarting = false;
+                if (startToken === cameraStartToken) {
+                    alert(err.message || "Camera open nahi ho paya. Please allow camera permission.");
+                    stopCamera();
+                } else if (html5QrCode) {
+                    html5QrCode.clear();
+                    html5QrCode = null;
+                }
             } finally {
                 inlineBtn.disabled = false;
             }
         }
 
         function stopCamera() {
+            cameraStartToken += 1;
             const inlineBtn = document.getElementById('inline-scan-btn');
             inlineBtn.classList.replace('bg-emerald-100', 'bg-indigo-50');
             inlineBtn.classList.replace('text-emerald-700', 'text-indigo-700');
 
-            if (html5QrCode && cameraActive) {
-                html5QrCode.stop().then(() => {
-                    html5QrCode.clear();
-                }).catch(() => {});
+            if (html5QrCode) {
+                const scanner = html5QrCode;
+                if (cameraActive) {
+                    html5QrCode = null;
+                    scanner.stop().then(() => scanner.clear()).catch((error) => {
+                        console.warn('Unable to stop barcode scanner cleanly:', error);
+                    });
+                } else if (!cameraStarting) {
+                    html5QrCode = null;
+                    scanner.clear();
+                }
             }
             cameraActive = false;
-            document.getElementById('reader-container').classList.add('hidden');
+            const dialog = document.getElementById('scanner-dialog');
+            if (dialog.open) dialog.close();
         }
+        document.getElementById('scanner-dialog').addEventListener('cancel', (event) => {
+            event.preventDefault();
+            stopCamera();
+        });
 
         // =========================================================================
         // MANAGER EDITABLE PRODUCT TABLE LOGIC
@@ -6595,7 +6652,10 @@ def api_search():
         return jsonify({"found": False, "items": []})
     physical_stock_only = request.args.get("physical_stock") == "1"
     with connect_db() as conn:
-        resolved = conn.execute("SELECT article_code FROM ean_aliases WHERE ean_code = ?", (q,)).fetchone()
+        resolved = conn.execute(
+            "SELECT article_code FROM ean_aliases WHERE LOWER(ean_code) = LOWER(?)",
+            (q,),
+        ).fetchone()
         article_code = resolved["article_code"] if resolved else q
         if physical_stock_only:
             rows = conn.execute(
@@ -6612,7 +6672,9 @@ def api_search():
                    FROM system_stock s
                    LEFT JOIN products p ON p.barcode = s.article_code
                    LEFT JOIN ean_aliases e ON e.article_code = s.article_code
-                   WHERE s.sys_qty > 0 AND (s.article_code = ? OR e.ean_code = ?)
+                   WHERE s.sys_qty > 0 AND (
+                       LOWER(s.article_code) = LOWER(?) OR LOWER(e.ean_code) = LOWER(?)
+                   )
                    LIMIT 15""",
                 (article_code, q),
             ).fetchall()
@@ -6622,9 +6684,40 @@ def api_search():
                           p.price_bag, p.article_type, p.list_price, p.list_price_unit,
                           s.sys_qty
                    FROM products p LEFT JOIN system_stock s ON s.article_code = p.barcode
-                   WHERE p.barcode = ?""",
+                   WHERE LOWER(p.barcode) = LOWER(?)""",
                 (article_code,),
             ).fetchall()
+        if not rows:
+            if physical_stock_only:
+                rows = conn.execute(
+                    """SELECT DISTINCT COALESCE(p.barcode, s.article_code) AS barcode,
+                              COALESCE(NULLIF(s.article_name, ''), p.name) AS name,
+                              COALESCE(p.price_cx, '') AS price_cx,
+                              COALESCE(p.price_emb, '') AS price_emb,
+                              COALESCE(p.price_pc_kgm, '') AS price_pc_kgm,
+                              COALESCE(p.price_bag, '') AS price_bag,
+                              COALESCE(p.article_type, 'NORMAL') AS article_type,
+                              COALESCE(p.list_price, '') AS list_price,
+                              COALESCE(p.list_price_unit, 'UN') AS list_price_unit,
+                              s.sys_qty
+                       FROM system_stock s
+                       LEFT JOIN products p ON p.barcode = s.article_code
+                       WHERE s.sys_qty > 0 AND (
+                           LOWER(p.name) = LOWER(?) OR
+                           (p.barcode IS NULL AND LOWER(s.article_name) = LOWER(?))
+                       )
+                       LIMIT 15""",
+                    (q, q),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT p.barcode, p.name, p.price_cx, p.price_emb, p.price_pc_kgm,
+                              p.price_bag, p.article_type, p.list_price, p.list_price_unit,
+                              s.sys_qty
+                       FROM products p LEFT JOIN system_stock s ON s.article_code = p.barcode
+                       WHERE LOWER(p.name) = LOWER(?) LIMIT 15""",
+                    (q,),
+                ).fetchall()
         if not rows:
             like_q = f"%{q}%"
             if physical_stock_only:
@@ -6643,8 +6736,10 @@ def api_search():
                        LEFT JOIN products p ON p.barcode = s.article_code
                        LEFT JOIN ean_aliases e ON e.article_code = s.article_code
                        WHERE s.sys_qty > 0 AND (
-                           s.article_code LIKE ? OR s.article_name LIKE ? OR
-                           COALESCE(p.name, '') LIKE ? OR e.ean_code LIKE ?
+                           LOWER(s.article_code) LIKE LOWER(?) OR
+                           LOWER(s.article_name) LIKE LOWER(?) OR
+                           LOWER(COALESCE(p.name, '')) LIKE LOWER(?) OR
+                           LOWER(e.ean_code) LIKE LOWER(?)
                        )
                        LIMIT 15""",
                     (like_q, like_q, like_q, like_q),
@@ -6657,7 +6752,9 @@ def api_search():
                        FROM products p
                        LEFT JOIN ean_aliases e ON e.article_code = p.barcode
                        LEFT JOIN system_stock s ON s.article_code = p.barcode
-                       WHERE p.name LIKE ? OR p.barcode LIKE ? OR e.ean_code LIKE ? LIMIT 15""",
+                       WHERE LOWER(p.name) LIKE LOWER(?)
+                          OR LOWER(p.barcode) LIKE LOWER(?)
+                          OR LOWER(e.ean_code) LIKE LOWER(?) LIMIT 15""",
                     (like_q, like_q, like_q),
                 ).fetchall()
                 if not rows:
@@ -6669,7 +6766,10 @@ def api_search():
                            FROM system_stock s
                            LEFT JOIN products p ON p.barcode = s.article_code
                            WHERE p.barcode IS NULL
-                             AND (s.article_code LIKE ? OR s.article_name LIKE ?)
+                             AND (
+                                 LOWER(s.article_code) LIKE LOWER(?) OR
+                                 LOWER(s.article_name) LIKE LOWER(?)
+                             )
                            LIMIT 15""",
                         (like_q, like_q),
                     ).fetchall()
