@@ -4459,6 +4459,7 @@ HTML_TEMPLATE = """
     <meta name="theme-color" content="#4338ca">
     <script defer src="https://cdn.tailwindcss.com"></script>
     <style>
+        .hidden { display: none !important; }
         body.portal-body {
             background: #f1f5f9;
         }
