@@ -10,8 +10,28 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, Response
 import pandas as pd
+import os
+import boto3
+from botocore.client import Config
+from botocore.exceptions import ClientError
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+BUCKET_NAME = os.environ.get("B2_BUCKET_NAME")
+
+def get_b2_client():
+    endpoint = os.environ.get("B2_ENDPOINT")
+    if endpoint and not endpoint.startswith("http"):
+        endpoint = f"https://{endpoint}"
+
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=os.environ.get("B2_KEY_ID"),
+        aws_secret_access_key=os.environ.get("B2_APPLICATION_KEY"),
+        region_name=os.environ.get("B2_REGION", "us-east-005"),
+        config=Config(signature_version="s3v4"),
+    )
 # Vercel Functions have a read-only application filesystem. Temporary writes
 # must go under /tmp. These paths also continue to work locally.
 IS_VERCEL = bool(os.getenv("VERCEL"))
