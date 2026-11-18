@@ -156,7 +156,7 @@ def portal_identity():
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with connect_db() as conn:
         row = conn.execute(
-            """SELECT u.username, u.role, u.must_change_password
+            """SELECT u.username, u.role, u.must_change_password, u.account_type, u.store_id
                FROM portal_sessions s
                JOIN portal_users u ON u.username = s.username
                WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1""",
@@ -342,6 +342,8 @@ def init_db():
             )
         if "request_id" not in print_job_cols:
             conn.execute("ALTER TABLE print_jobs ADD COLUMN request_id TEXT")
+        if "store_id" not in print_job_cols:
+            conn.execute("ALTER TABLE print_jobs ADD COLUMN store_id TEXT NOT NULL DEFAULT 'LEGACY'")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_print_jobs_request_id "
             "ON print_jobs(request_id) WHERE request_id IS NOT NULL"
@@ -372,6 +374,18 @@ def init_db():
                 updated_at TEXT NOT NULL
             )
         """)
+        # Multi-store tenancy columns. account_type keeps the original role CHECK compatible.
+        user_cols = [row["name"] for row in conn.execute("PRAGMA table_info(portal_users)").fetchall()] if not USE_POSTGRES else [row["column_name"] for row in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='portal_users'").fetchall()]
+        for col, ddl in (
+            ("account_type", "TEXT NOT NULL DEFAULT 'user'"),
+            ("store_id", "TEXT"),
+            ("parent_username", "TEXT"),
+            ("bridge_key", "TEXT"),
+        ):
+            if col not in user_cols:
+                conn.execute(f"ALTER TABLE portal_users ADD COLUMN {col} {ddl}")
+        conn.execute("UPDATE portal_users SET account_type='developer' WHERE username=?", (DEVELOPER_USER_ID,))
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS portal_sessions (
                 token_hash TEXT PRIMARY KEY,
@@ -6983,7 +6997,7 @@ def authenticate():
 
     with connect_db() as conn:
         user = conn.execute(
-            "SELECT username,password_hash,role,must_change_password,active "
+            "SELECT username,password_hash,role,must_change_password,active,account_type,store_id "
             "FROM portal_users WHERE username=?",
             (username,),
         ).fetchone()
@@ -6992,22 +7006,7 @@ def authenticate():
                 "success": False,
                 "error": "Developer account is not initialized. Configure DEVELOPER_INITIAL_PASSWORD first.",
             }), 503
-        if not user and username != DEVELOPER_USER_ID and hmac.compare_digest(
-            password, EMPLOYEE_PASSWORD
-        ):
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """INSERT INTO portal_users
-                     (username,password_hash,role,must_change_password,active,created_at,updated_at)
-                   VALUES(?,?,'employee',1,1,?,?)
-                   ON CONFLICT(username) DO NOTHING""",
-                (username, hash_password(password), now, now),
-            )
-            user = conn.execute(
-                "SELECT username,password_hash,role,must_change_password,active "
-                "FROM portal_users WHERE username=?",
-                (username,),
-            ).fetchone()
+        # Users must be created by their store admin; no shared-password auto creation.
         if not user or not user["active"] or not verify_password(
             password, user["password_hash"]
         ):
@@ -7082,86 +7081,43 @@ def require_developer():
 
 @app.route("/api/employees")
 def list_employee_accounts():
-    if not require_developer():
-        return jsonify({"success": False, "error": "Developer access required."}), 403
+    identity = portal_identity()
+    if not identity or identity["must_change_password"] or identity.get("account_type") not in ("developer", "store"):
+        return jsonify({"success": False, "error": "Store administration access required."}), 403
     with connect_db() as conn:
-        rows = conn.execute(
-            """SELECT username,must_change_password,created_at
-               FROM portal_users WHERE role='employee' AND active=1
-               ORDER BY username"""
-        ).fetchall()
-    return jsonify({
-        "success": True,
-        "items": [
-            {
-                "username": row["username"],
-                "must_change_password": bool(row["must_change_password"]),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ],
-    })
-
+        if identity["account_type"] == "developer":
+            rows = conn.execute("SELECT username,must_change_password,created_at,account_type,store_id FROM portal_users WHERE account_type='store' AND active=1 ORDER BY username").fetchall()
+        else:
+            rows = conn.execute("SELECT username,must_change_password,created_at,account_type,store_id FROM portal_users WHERE account_type='user' AND store_id=? AND active=1 ORDER BY username", (identity["store_id"],)).fetchall()
+    return jsonify({"success": True, "items": [dict(row) for row in rows]})
 
 @app.route("/api/employees", methods=["POST"])
 def create_employee_account():
-    if not require_developer():
-        return jsonify({"success": False, "error": "Developer access required."}), 403
+    identity = portal_identity()
+    if not identity or identity["must_change_password"] or identity.get("account_type") not in ("developer", "store"):
+        return jsonify({"success": False, "error": "Store administration access required."}), 403
     data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({"success": False, "error": "Invalid request."}), 400
     username = str(data.get("username", "")).strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{1,39}", username):
-        return jsonify({"success": False, "error": "Use a 2–40 character ID with letters, numbers, dot, underscore, or hyphen."}), 400
-    if username == DEVELOPER_USER_ID:
-        return jsonify({"success": False, "error": "This ID is reserved for the developer."}), 400
-
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{1,39}", username) or username == DEVELOPER_USER_ID:
+        return jsonify({"success": False, "error": "Invalid or reserved user ID."}), 400
+    creating_store = identity["account_type"] == "developer"
+    store_id = username if creating_store else identity["store_id"]
+    account_type = "store" if creating_store else "user"
+    role = "developer" if creating_store else "employee"
     temporary_password = generate_temporary_password()
+    bridge_key = secrets.token_urlsafe(32) if creating_store else None
     now = datetime.now(timezone.utc).isoformat()
     with connect_db() as conn:
-        inserted = conn.execute(
-            """INSERT INTO portal_users
-                 (username,password_hash,role,must_change_password,active,created_at,updated_at)
-               VALUES(?,?,'employee',1,1,?,?)
-               ON CONFLICT(username) DO NOTHING
-               RETURNING username""",
-            (username, hash_password(temporary_password), now, now),
-        ).fetchone()
-        if not inserted:
-            return jsonify({"success": False, "error": "Employee ID already exists."}), 409
+        inserted = conn.execute("""INSERT INTO portal_users
+            (username,password_hash,role,must_change_password,active,created_at,updated_at,account_type,store_id,parent_username,bridge_key)
+            VALUES(?,?,?,?,1,?,?,?,?,?,?) ON CONFLICT(username) DO NOTHING""",
+            (username,hash_password(temporary_password),role,1,now,now,account_type,store_id,identity["username"],bridge_key))
+        if inserted.rowcount == 0:
+            return jsonify({"success": False, "error": "This user ID already exists."}), 409
         conn.commit()
-    return jsonify({
-        "success": True,
-        "username": username,
-        "temporary_password": temporary_password,
-    }), 201
-
-
-@app.route("/api/employees/<username>/reset-password", methods=["POST"])
-def reset_employee_password(username):
-    if not require_developer():
-        return jsonify({"success": False, "error": "Developer access required."}), 403
-    username = str(username).strip().upper()
-    if username == DEVELOPER_USER_ID:
-        return jsonify({"success": False, "error": "Developer password cannot be reset here."}), 400
-    temporary_password = generate_temporary_password()
-    now = datetime.now(timezone.utc).isoformat()
-    with connect_db() as conn:
-        result = conn.execute(
-            """UPDATE portal_users
-               SET password_hash=?,must_change_password=1,updated_at=?
-               WHERE username=? AND role='employee' AND active=1""",
-            (hash_password(temporary_password), now, username),
-        )
-        if result.rowcount == 0:
-            return jsonify({"success": False, "error": "Employee account not found."}), 404
-        conn.execute("DELETE FROM portal_sessions WHERE username=?", (username,))
-        conn.commit()
-    return jsonify({
-        "success": True,
-        "username": username,
-        "temporary_password": temporary_password,
-    })
+    payload={"success":True,"username":username,"temporary_password":temporary_password,"account_type":account_type,"store_id":store_id}
+    if bridge_key: payload["bridge_key"]=bridge_key
+    return jsonify(payload)
 
 
 @app.route("/api/data-delete", methods=["POST"])
@@ -7596,6 +7552,10 @@ def api_manager_products():
 
 @app.route("/api/print-jobs", methods=["POST"])
 def create_print_job():
+    identity = portal_identity()
+    if not identity or identity["must_change_password"] or not identity.get("store_id"):
+        return jsonify({"success":False,"error":"Store login required for printing"}),401
+    store_id = identity["store_id"]
     data=request.get_json(silent=True) or {}
     for key in ("article_code","item_name","price"):
         if not str(data.get(key,"")).strip(): return jsonify({"success":False,"error":f"Missing {key}"}),400
@@ -7679,15 +7639,15 @@ def create_print_job():
         cur = conn.execute(
             """INSERT INTO print_jobs
                  (article_code,item_name,price,unit,currency,copies,print_format,
-                  printer_id,request_id,status,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?, 'pending',?)
+                  printer_id,request_id,status,created_at,store_id)
+               VALUES(?,?,?,?,?,?,?,?,?, 'pending',?,?)
                ON CONFLICT(request_id) WHERE request_id IS NOT NULL DO NOTHING
                RETURNING id""",
             (
                 str(data["article_code"]), str(data["item_name"]),
                 str(data["price"]), str(data.get("unit", "UN")),
                 str(data.get("currency", "KZ")), copies, print_format,
-                printer_id, request_id, datetime.now().isoformat(timespec="seconds"),
+                printer_id, request_id, datetime.now().isoformat(timespec="seconds"), store_id,
             ),
         )
         inserted_job = cur.fetchone()
@@ -7695,7 +7655,7 @@ def create_print_job():
             job_id = inserted_job["id"]
         else:
             existing_job = conn.execute(
-                "SELECT id FROM print_jobs WHERE request_id = ?", (request_id,)
+                "SELECT id FROM print_jobs WHERE request_id = ? AND store_id=?", (request_id,store_id)
             ).fetchone()
             if not existing_job:
                 raise RuntimeError("Unable to resolve duplicate print request.")
@@ -7703,43 +7663,42 @@ def create_print_job():
         conn.commit()
     return jsonify({"success":True,"job_id":job_id,"copies":copies,"print_format":print_format,"printer_id":printer_id})
 
+def _bridge_store_id():
+    return request.headers.get("X-Store-Id", "").strip().upper()
+
 def _bridge_ok():
-    key=os.environ.get("PRINT_BRIDGE_KEY","")
-    return bool(key) and request.headers.get("X-Print-Bridge-Key","")==key
+    store_id=_bridge_store_id(); key=request.headers.get("X-Print-Bridge-Key","")
+    if not store_id or not key: return False
+    with connect_db() as conn:
+        row=conn.execute("SELECT bridge_key FROM portal_users WHERE account_type='store' AND store_id=? AND active=1",(store_id,)).fetchone()
+    return bool(row and row["bridge_key"] and hmac.compare_digest(key,row["bridge_key"]))
 
 def _bridge_printer_id():
-    printer_id = request.headers.get("X-Print-Bridge-Id", "printer1").strip()
-    return printer_id if printer_id in ("printer1", "printer2") else None
+    printer_id=request.headers.get("X-Print-Bridge-Id","printer1").strip()
+    return printer_id if printer_id in ("printer1","printer2") else None
 
 @app.route("/api/print-jobs/next")
 def next_print_job():
-    if not _bridge_ok(): return jsonify({"success":False,"error":"Unauthorized"}),401
-    printer_id = _bridge_printer_id()
+    if not _bridge_ok(): return jsonify({"success":False,"error":"Unauthorized store bridge"}),401
+    store_id=_bridge_store_id(); printer_id=_bridge_printer_id()
     if not printer_id: return jsonify({"success":False,"error":"Unsupported printer"}),400
     with connect_db() as conn:
-        if not USE_POSTGRES:
-            conn.execute("BEGIN IMMEDIATE")
-        claim_query = "SELECT * FROM print_jobs WHERE status='pending' AND printer_id=? ORDER BY id LIMIT 1"
-        if USE_POSTGRES:
-            claim_query += " FOR UPDATE SKIP LOCKED"
-        row=conn.execute(claim_query, (printer_id,)).fetchone()
+        if not USE_POSTGRES: conn.execute("BEGIN IMMEDIATE")
+        q="SELECT * FROM print_jobs WHERE status='pending' AND store_id=? AND printer_id=? ORDER BY id LIMIT 1"
+        if USE_POSTGRES: q += " FOR UPDATE SKIP LOCKED"
+        row=conn.execute(q,(store_id,printer_id)).fetchone()
         if not row: conn.commit(); return jsonify({"success":True,"job":None})
-        conn.execute("UPDATE print_jobs SET status='claimed',claimed_at=? WHERE id=? AND printer_id=?",(datetime.now().isoformat(timespec='seconds'),row['id'],printer_id)); conn.commit()
+        conn.execute("UPDATE print_jobs SET status='claimed',claimed_at=? WHERE id=? AND store_id=? AND printer_id=?",(datetime.now().isoformat(timespec='seconds'),row['id'],store_id,printer_id)); conn.commit()
     return jsonify({"success":True,"job":dict(row)})
 
 @app.route("/api/print-jobs/<int:job_id>/complete",methods=["POST"])
 def complete_print_job(job_id):
-    if not _bridge_ok(): return jsonify({"success":False,"error":"Unauthorized"}),401
-    printer_id = _bridge_printer_id()
-    if not printer_id: return jsonify({"success":False,"error":"Unsupported printer"}),400
-    data=request.get_json(silent=True) or {}; ok=bool(data.get('success'))
+    if not _bridge_ok(): return jsonify({"success":False,"error":"Unauthorized store bridge"}),401
+    store_id=_bridge_store_id(); printer_id=_bridge_printer_id(); data=request.get_json(silent=True) or {}; ok=bool(data.get('success'))
     with connect_db() as conn:
-        if ok:
-            result=conn.execute("UPDATE print_jobs SET status='printed',printed_at=?,error_message=NULL WHERE id=? AND printer_id=? AND status='claimed'",(datetime.now().isoformat(timespec='seconds'),job_id,printer_id))
-        else:
-            result=conn.execute("UPDATE print_jobs SET status='pending',error_message=? WHERE id=? AND printer_id=? AND status='claimed'",(str(data.get('error','Print failed'))[:500],job_id,printer_id))
-        if result.rowcount == 0:
-            return jsonify({"success":False,"error":"Print job not found for this printer"}),404
+        if ok: result=conn.execute("UPDATE print_jobs SET status='printed',printed_at=?,error_message=NULL WHERE id=? AND store_id=? AND printer_id=? AND status='claimed'",(datetime.now().isoformat(timespec='seconds'),job_id,store_id,printer_id))
+        else: result=conn.execute("UPDATE print_jobs SET status='pending',error_message=? WHERE id=? AND store_id=? AND printer_id=? AND status='claimed'",(str(data.get('error','Print failed'))[:500],job_id,store_id,printer_id))
+        if result.rowcount==0: return jsonify({"success":False,"error":"Print job not found for this store printer"}),404
         conn.commit()
     return jsonify({"success":True})
 
