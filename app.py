@@ -10,10 +10,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, render_template_string, Response
 import pandas as pd
-import os
 
 app = Flask(__name__)
-BUCKET_NAME = os.environ.get("B2_BUCKET_NAME")
 
 # Vercel Functions have a read-only application filesystem. Temporary writes
 # must go under /tmp. These paths also continue to work locally.
@@ -4524,7 +4522,7 @@ MANIFEST_JSON = """
 
 # --- SERVICE WORKER FOR OFFLINE CACHING & PWA ---
 SERVICE_WORKER_JS = """
-const CACHE_NAME = 'store-price-portal-v21-incremental-sync';
+const CACHE_NAME = 'store-price-portal-v22-direct-db-upload';
 const ASSETS_TO_CACHE = [
     '/',
     'https://cdn.tailwindcss.com',
@@ -4553,7 +4551,11 @@ self.addEventListener('fetch', (event) => {
     if (event.request.method !== 'GET') return;
     const url = new URL(event.request.url);
 
-    if (url.pathname.startsWith('/api/')) return;
+    // API and main HTML must always use the latest deployment.
+    if (url.pathname.startsWith('/api/') || url.pathname === '/') {
+        event.respondWith(fetch(event.request, {cache: 'no-store'}));
+        return;
+    }
 
     event.respondWith(
         fetch(event.request)
@@ -6938,6 +6940,15 @@ HTML_TEMPLATE = """
 
 
 # --- ROUTES ---
+@app.after_request
+def disable_stale_app_cache(response):
+    if request.path == "/" or request.path.startswith("/api/") or request.path == "/service-worker.js":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.route("/")
 def index():
     with connect_db() as conn:
